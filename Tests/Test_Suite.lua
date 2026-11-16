@@ -12,6 +12,7 @@ require("Config")
 require("Utils.Formatter")
 require("Data.VendorDatabase")
 require("Data.DisenchantDatabase")
+require("Data.RecipeDatabase")
 require("Modules.RecipeScanner")
 require("Modules.OpportunityEngine")
 require("Modules.AHVerifier")
@@ -223,5 +224,61 @@ Assert(detailFrame:IsShown() == true, "DetailWindow stays open outside the Aucti
 PF.DetailWindow.ShowOpportunity(topPlays[2])
 detailFrame.recipeBtn:Click()
 Assert(Mock.craftedTradeSkill ~= nil, "Clicking Open Recipe triggers crafting / selects recipe")
+
+-- 8. Test One-Click "Buy Next" Button in DetailWindow
+PF.DetailWindow.ShowOpportunity(topPlays[1])
+Mock.placedBids = {}
+Mock.currentAuctionResults = Mock.auctionListingsByQuery["Peacebloom"]
+row1Shop.buyBtn:Click()
+Assert(#Mock.placedBids == 1 and Mock.placedBids[1].index == 1 and Mock.placedBids[1].amount == (5 * 10400), "Clicking Buy Next purchases the cheapest qualifying AH listing (5x @ 1g 04s)")
+
+-- 9. Test 5% Faction AH Cut vs 15% Neutral AH Cut & Gear Deposit Risk
+local solidPlay = nil
+for _, p in ipairs(topPlays) do
+    if p.itemId == 7966 then solidPlay = p end
+end
+Assert(solidPlay ~= nil and solidPlay.ahCutRate == 0.05 and solidPlay.totalAHCut > 0, "5% Faction AH cut is deducted and recorded on Craft and AH plays")
+
+Mock.depositRate = 25 -- Simulate Neutral AH (Gadgetzan / Booty Bay)
+Assert(PF.GetEffectiveAHCutRate() == 0.15, "Auto-detect 15% AH cut when at a Neutral Auction House")
+Mock.depositRate = 5
+Assert(PF.GetEffectiveAHCutRate() == 0.05, "Restore 5% AH cut at Faction Auction House")
+
+-- Verify slow-moving gear Craft and AH deducts expected 15% vendor deposit risk and caps units at maxAHGearUnits (3)
+local gearCand = {
+    actionType = "CRAFT_AH",
+    itemId = 5540, -- Iridescent Hammer (Weapon, vendorSell = 3194)
+    itemName = "Iridescent Hammer",
+    ahCutRate = 0.05,
+    unitGrossRevenue = 60000,
+    unitAHCut = 3000,
+    unitDepositRisk = math.floor(3194 * 0.15),
+    unitNetRevenue = 60000 - 3000 - math.floor(3194 * 0.15),
+    maxUnits = Profitable_DB.settings.maxAHGearUnits,
+    rawReagents = { { itemId = 2841, name = "Bronze Bar", count = 10 } },
+}
+local gearOpp = PF.OpportunityEngine.CalculateSteppedOpportunity(gearCand, 220000)
+Assert(gearOpp ~= nil and gearOpp.quantity == 3 and gearOpp.totalDepositRisk == (3 * math.floor(3194 * 0.15)), "Cap slow-moving AH gear crafts at 3 units and deduct expected AH deposit risk")
+
+-- 10. Test Baseline Skill-Matched Recipes & Trainer Recommendations
+Mock.skillLines = {
+    { name = "Tailoring", isHeader = false, rank = 240, maxRank = 300 },
+}
+local allKnownAndRecommended = PF.RecipeScanner.GetKnownRecipes()
+local foundRuneclothBeltTrainer = false
+for _, rec in ipairs(allKnownAndRecommended) do
+    if rec.outputItemId == 13856 and rec.isTrainerRecommendation then
+        foundRuneclothBeltTrainer = true
+    end
+end
+Assert(foundRuneclothBeltTrainer == true, "Recommend Runecloth Belt (Skill 255) for a 240 Tailoring character via Trainer Lookahead")
+
+-- 11. Test Limited-Supply NPC Vendor Arbitrage Alert (after 5% AH cut)
+Mock.merchantItems = {
+    { itemId = 10940, name = "Strange Dust", price = 80, quantity = 1, numAvailable = 5 }, -- 80c at vendor, 200c on AH (190c net after 5% cut) -> +5s 50c profit? Let's make Strange Dust 50s on AH!
+}
+_G.PCF_DB.prices[10940] = { minBuyout = 5000, count = 40, lastUpdated = Mock.currentTime }
+PF.VendorDatabase.ScanOpenMerchant()
+Assert(#Profitable_DB.vendorAlerts == 1 and Profitable_DB.vendorAlerts[1].itemId == 10940 and Profitable_DB.vendorAlerts[1].unitAHNet == 4750, "Detect limited-supply vendor arbitrage opportunity with 5% AH cut deducted")
 
 print("\nAll Profitable test assertions passed successfully!")

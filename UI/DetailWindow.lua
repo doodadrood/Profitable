@@ -88,9 +88,14 @@ local function CreateShoppingRow(parent, index)
     end
 
     local searchBtn = CreateFrame("Button", "PF_DetailShoppingSearchBtn" .. index, row, "UIPanelButtonTemplate")
-    if searchBtn.SetSize then searchBtn:SetSize(84, 22) end
-    if searchBtn.SetPoint then searchBtn:SetPoint("RIGHT", row, "RIGHT", -6, 0) end
+    if searchBtn.SetSize then searchBtn:SetSize(74, 22) end
+    if searchBtn.SetPoint then searchBtn:SetPoint("RIGHT", row, "RIGHT", -80, 0) end
     if searchBtn.SetText then searchBtn:SetText("Search AH") end
+
+    local buyBtn = CreateFrame("Button", "PF_DetailShoppingBuyBtn" .. index, row, "UIPanelButtonTemplate")
+    if buyBtn.SetSize then buyBtn:SetSize(70, 22) end
+    if buyBtn.SetPoint then buyBtn:SetPoint("RIGHT", row, "RIGHT", -6, 0) end
+    if buyBtn.SetText then buyBtn:SetText("Buy Next") end
 
     itemBtn:SetScript("OnClick", function()
         if row._itemData then
@@ -112,10 +117,18 @@ local function CreateShoppingRow(parent, index)
         end
     end)
 
+    buyBtn:SetScript("OnClick", function()
+        if row._itemData then
+            local rem = math.max(1, row._itemData.remainingToBuy or row._itemData.totalQuantity or 1)
+            PF.AHVerifier.BuyNextCheapListing(row._itemData.itemId, row._itemData.name, row._itemData.maxUnitPrice, rem)
+        end
+    end)
+
     row.itemBtn = itemBtn
     row.itemText = itemText
     row.statusText = statusText
     row.searchBtn = searchBtn
+    row.buyBtn = buyBtn
     return row
 end
 
@@ -284,11 +297,17 @@ function PF.DetailWindow.RefreshIfShown()
     if detailFrame.metricsText then
         local costStr = PF.Formatter.FormatMoney(opp.totalCost)
         local revStr = PF.Formatter.FormatMoney(opp.totalNetRevenue)
-        local cutStr = (opp.totalAHCut and opp.totalAHCut > 0) and PF.Formatter.FormatMoney(opp.totalAHCut) or "0c (Vendor)"
+        local cutPct = math.floor(((opp.ahCutRate or 0.05) * 100) + 0.5)
+        local cutStr = (opp.totalAHCut and opp.totalAHCut > 0)
+            and string.format("%s (%d%%)", PF.Formatter.FormatMoney(opp.totalAHCut), cutPct)
+            or "0c (Vendor)"
+        local depStr = (opp.totalDepositRisk and opp.totalDepositRisk > 0)
+            and string.format("  |cffffd100Est. Deposit:|r %s", PF.Formatter.FormatMoney(opp.totalDepositRisk))
+            or ""
         local profStr = PF.Formatter.FormatMoney(opp.totalProfit)
         detailFrame.metricsText:SetText(string.format(
-            "|cffffd100Cost:|r %s   |cffffd100Net Revenue:|r %s   |cffffd100AH Cut:|r %s\n|cff00ff00Total Profit:|r |cff00ff00%s|r (%d%% ROI)",
-            costStr, revStr, cutStr, profStr, opp.roiPercent or 0
+            "|cffffd100Cost:|r %s   |cffffd100Net Rev:|r %s   |cffffd100AH Cut:|r %s%s\n|cff00ff00Total Profit:|r |cff00ff00%s|r (%d%% ROI)",
+            costStr, revStr, cutStr, depStr, profStr, opp.roiPercent or 0
         ))
     end
 

@@ -287,13 +287,17 @@ function PF.RecipeScanner.GetKnownRecipes()
     PF.RecipeScanner.ScanCurrentProfessionWindow()
 
     local list = {}
-    local seen = {}
+    local seenByOutput = {}
+    local knownProfessions = {}
 
     local function AddFromTable(tbl)
         if type(tbl) ~= "table" then return end
         for key, recipe in pairs(tbl) do
-            if type(recipe) == "table" and recipe.outputItemId and not seen[key] then
-                seen[key] = true
+            if type(recipe) == "table" and recipe.outputItemId and not seenByOutput[recipe.outputItemId] then
+                seenByOutput[recipe.outputItemId] = true
+                if recipe.profession then
+                    knownProfessions[recipe.profession] = math.max(knownProfessions[recipe.profession] or 0, recipe.skillReq or 1)
+                end
                 table.insert(list, recipe)
             end
         end
@@ -307,6 +311,41 @@ function PF.RecipeScanner.GetKnownRecipes()
         else
             local charKey = PF.GetCharacterKey()
             AddFromTable(Profitable_DB.charRecipes[charKey])
+        end
+    end
+
+    -- Incorporate skill-matched baseline recipes and Trainer/Unlearned recipe recommendations
+    local settings = (Profitable_DB and Profitable_DB.settings) or {}
+    if settings.includeSkillMatchedBaselineRecipes ~= false and PF.RecipeDatabase and PF.RecipeDatabase.GetAllBaselineRecipes then
+        local skillRanks = PF.RecipeDatabase.GetCharacterSkillRanks()
+        for prof, info in pairs(skillRanks) do
+            knownProfessions[prof] = math.max(knownProfessions[prof] or 0, info.rank or 0)
+        end
+
+        local lookahead = (settings.includeTrainerRecommendations ~= false) and (settings.trainerSkillLookahead or 25) or 0
+        for _, base in ipairs(PF.RecipeDatabase.GetAllBaselineRecipes()) do
+            if not seenByOutput[base.outputItemId] and base.profession and knownProfessions[base.profession] then
+                local charRank = knownProfessions[base.profession]
+                local req = base.skillReq or 1
+                if req <= (charRank + lookahead) then
+                    seenByOutput[base.outputItemId] = true
+                    local isUnlearned = (req > charRank) or (base.source and base.source ~= "Trainer")
+                    table.insert(list, {
+                        name = base.name,
+                        profession = base.profession,
+                        skillReq = req,
+                        source = base.source or "Trainer",
+                        isTrainerRecommendation = true,
+                        needsLearning = isUnlearned,
+                        sourceHint = string.format("%s (Skill %d)", base.source or "Trainer", req),
+                        outputItemId = base.outputItemId,
+                        minMade = 1,
+                        maxMade = base.avgMade or 1,
+                        avgMade = base.avgMade or 1,
+                        reagents = base.reagents,
+                    })
+                end
+            end
         end
     end
 

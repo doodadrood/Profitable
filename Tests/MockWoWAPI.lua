@@ -13,6 +13,10 @@ local Mock = {
     castSpells = {},
     selectedTradeSkill = nil,
     craftedTradeSkill = nil,
+    placedBids = {},
+    skillLines = {},
+    merchantItems = {},
+    depositRate = 5,
 }
 
 _G.SlashCmdList = _G.SlashCmdList or {}
@@ -197,6 +201,36 @@ _G.GetAuctionItemInfo = function(listType, index)
     local row = Mock.currentAuctionResults[index]
     if not row then return nil end
     return row.name, nil, row.count or 1, 1, nil, 1, nil, row.minBid or row.buyoutPrice, 0, row.buyoutPrice, 0, nil, 0, "Seller", nil, 0, row.itemId
+end
+_G.SetSelectedAuctionItem = function(listType, index)
+    Mock.selectedAuctionIndex = index
+end
+_G.PlaceAuctionBid = function(listType, index, amount)
+    table.insert(Mock.placedBids, { listType = listType, index = index, amount = amount })
+end
+_G.GetAuctionHouseDepositRate = function()
+    return Mock.depositRate
+end
+_G.GetNumSkillLines = function()
+    return #Mock.skillLines
+end
+_G.GetSkillLineInfo = function(index)
+    local s = Mock.skillLines[index]
+    if not s then return nil end
+    return s.name, s.isHeader or false, true, s.rank or 1, 0, 0, s.maxRank or 300
+end
+_G.GetMerchantNumItems = function()
+    return #Mock.merchantItems
+end
+_G.GetMerchantItemInfo = function(index)
+    local m = Mock.merchantItems[index]
+    if not m then return nil end
+    return m.name, nil, m.price, m.quantity or 1, m.numAvailable or -1
+end
+_G.GetMerchantItemLink = function(index)
+    local m = Mock.merchantItems[index]
+    if not m then return nil end
+    return m.link or string.format("|cffffffff|Hitem:%d:0:0:0|h[%s]|h|r", m.itemId, m.name or "Item")
 end
 
 return Mock

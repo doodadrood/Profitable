@@ -353,21 +353,61 @@ function PF.VendorDatabase.ScanOpenMerchant()
 
     Profitable_DB = Profitable_DB or {}
     Profitable_DB.vendorBuyPrices = Profitable_DB.vendorBuyPrices or {}
+    Profitable_DB.vendorAlerts = {}
+
+    local ahCut = (PF.GetEffectiveAHCutRate and PF.GetEffectiveAHCutRate()) or 0.05
+    local alertsEnabled = not (Profitable_DB.settings and Profitable_DB.settings.enableVendorArbitrageAlerts == false)
 
     local learned = 0
     for i = 1, numItems do
         local okInfo, name, texture, price, quantity, numAvailable = pcall(_G.GetMerchantItemInfo, i)
         if okInfo and price and price > 0 then
-            -- Only treat unlimited stock (numAvailable == -1) as reliable unlimited vendor supply
-            if numAvailable == nil or numAvailable == -1 then
-                local link = _G.GetMerchantItemLink and _G.GetMerchantItemLink(i)
-                local itemId = link and tonumber(link:match("item:(%d+)"))
-                if itemId and itemId > 0 then
-                    local qty = (quantity and quantity > 0) and quantity or 1
-                    local unitPrice = math.max(1, math.floor((price / qty) + 0.5))
+            local link = _G.GetMerchantItemLink and _G.GetMerchantItemLink(i)
+            local itemId = link and tonumber(link:match("item:(%d+)"))
+            if itemId and itemId > 0 then
+                local qty = (quantity and quantity > 0) and quantity or 1
+                local unitPrice = math.max(1, math.floor((price / qty) + 0.5))
+                PF.VendorDatabase.GetItemMetadata(itemId, link)
+
+                -- Unlimited stock (numAvailable == -1) is recorded as a reliable vendor reagent price
+                if numAvailable == nil or numAvailable == -1 then
                     Profitable_DB.vendorBuyPrices[itemId] = unitPrice
-                    PF.VendorDatabase.GetItemMetadata(itemId, link)
                     learned = learned + 1
+                end
+
+                -- Check Limited-Supply (or underpriced) Vendor -> AH Arbitrage (after 5% AH cut!)
+                if alertsEnabled and numAvailable and numAvailable > 0 and PF.OpportunityEngine and PF.OpportunityEngine.ResolveAHPrice then
+                    local ahUnit = PF.OpportunityEngine.ResolveAHPrice(itemId, link)
+                    if ahUnit and ahUnit > 0 then
+                        local netAHUnit = math.floor(ahUnit * (1 - ahCut))
+                        local unitProfit = netAHUnit - unitPrice
+                        if unitProfit >= 1000 and netAHUnit >= (unitPrice * 1.5) then
+                            local displayLink = PF.Formatter.BuildItemLink(itemId, name, nil, link)
+                            local totalProfit = unitProfit * numAvailable
+                            table.insert(Profitable_DB.vendorAlerts, {
+                                merchantIndex = i,
+                                itemId = itemId,
+                                name = name or ("Item #" .. itemId),
+                                link = displayLink,
+                                stock = numAvailable,
+                                unitBuyPrice = unitPrice,
+                                unitAHGross = ahUnit,
+                                unitAHNet = netAHUnit,
+                                unitProfit = unitProfit,
+                                totalProfit = totalProfit,
+                            })
+                            print(string.format(
+                                "|cff00ff88[Profitable Vendor Alert]|r %s (x%d in stock) costs %s ea, sells on AH for %s (%s net after %d%% cut) -> |cff00ff00+%s profit!|r",
+                                displayLink,
+                                numAvailable,
+                                PF.Formatter.FormatMoney(unitPrice),
+                                PF.Formatter.FormatMoney(ahUnit),
+                                PF.Formatter.FormatMoney(netAHUnit),
+                                math.floor(ahCut * 100 + 0.5),
+                                PF.Formatter.FormatMoney(totalProfit)
+                            ))
+                        end
+                    end
                 end
             end
         end

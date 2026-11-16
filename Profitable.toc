@@ -11,6 +11,7 @@ Config.lua
 Utils/Formatter.lua
 Data/VendorDatabase.lua
 Data/DisenchantDatabase.lua
+Data/RecipeDatabase.lua
 Modules/RecipeScanner.lua
 Modules/OpportunityEngine.lua
 Modules/AHVerifier.lua

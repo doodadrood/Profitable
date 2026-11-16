@@ -460,6 +460,130 @@ function PF.AHVerifier.SearchItemOnAH(itemId, itemName, itemLink)
     return false
 end
 
+-- TSM-style One-Click Buyout Queue:
+-- Buys the cheapest currently visible AH listing for itemId that is at or below maxUnitPrice
+-- (or buys from an open NPC Merchant if the item is a Vendor reagent).
+function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neededQty)
+    if not itemId or itemId <= 0 then return false end
+    neededQty = math.max(1, math.floor(tonumber(neededQty) or 1))
+    local playerGold = PF.Formatter.GetPlayerGold()
+
+    -- 1. If Merchant window is open and sells this item, buy from Merchant
+    if _G.GetMerchantNumItems and _G.GetMerchantItemInfo and _G.BuyMerchantItem then
+        local okNum, numMerchant = pcall(_G.GetMerchantNumItems)
+        if okNum and type(numMerchant) == "number" and numMerchant > 0 then
+            for i = 1, numMerchant do
+                local link = _G.GetMerchantItemLink and _G.GetMerchantItemLink(i)
+                local mId = link and tonumber(link:match("item:(%d+)"))
+                local _, mName, _, price, batchQty, numAvailable = pcall(_G.GetMerchantItemInfo, i)
+                if mId == itemId or (not mId and mName and itemName and mName:lower() == itemName:lower()) then
+                    batchQty = (batchQty and batchQty > 0) and batchQty or 1
+                    local batches = math.max(1, math.ceil(neededQty / batchQty))
+                    if numAvailable and numAvailable > 0 then
+                        batches = math.min(batches, numAvailable)
+                    end
+                    pcall(_G.BuyMerchantItem, i, batches)
+                    print(string.format("|cff00ff88[Profitable]|r Purchased %dx [%s] from Merchant.", batches * batchQty, itemName or mName or ("Item #" .. itemId)))
+                    return true, batches * batchQty, (price or 0) * batches
+                end
+            end
+        end
+    end
+
+    if not PF.AHVerifier.IsAuctionHouseOpen() then
+        print("|cffff5555[Profitable]|r Open the Auction House first to buy listings.")
+        return false
+    end
+
+    -- 2. Legacy Auction House Buyout Path
+    if _G.GetNumAuctionItems and _G.GetAuctionItemInfo and _G.PlaceAuctionBid then
+        local numBatch = _G.GetNumAuctionItems("list") or 0
+        local bestIdx = nil
+        local bestUnitPrice = nil
+        local bestBuyout = nil
+        local bestCount = nil
+        local anyMatchOnPage = false
+
+        for i = 1, numBatch do
+            local name, _, count, _, _, _, _, minBid, _, buyoutPrice, _, _, _, _, _, _, rowItemId = _G.GetAuctionItemInfo("list", i)
+            if (not rowItemId or rowItemId <= 0) and _G.GetAuctionItemLink then
+                local link = _G.GetAuctionItemLink("list", i)
+                if type(link) == "string" then
+                    rowItemId = tonumber(link:match("item:(%d+)"))
+                end
+            end
+            local matches = (rowItemId and rowItemId == itemId)
+                or (not rowItemId and name and itemName and name:lower() == itemName:lower())
+
+            if matches then
+                anyMatchOnPage = true
+                if buyoutPrice and buyoutPrice > 0 and count and count > 0 and buyoutPrice <= playerGold then
+                    local unitPrice = math.floor(buyoutPrice / count)
+                    if (not maxUnitPrice or unitPrice <= maxUnitPrice) then
+                        if not bestUnitPrice or unitPrice < bestUnitPrice or (unitPrice == bestUnitPrice and count <= neededQty) then
+                            bestIdx = i
+                            bestUnitPrice = unitPrice
+                            bestBuyout = buyoutPrice
+                            bestCount = count
+                        end
+                    end
+                end
+            end
+        end
+
+        if not anyMatchOnPage then
+            PF.AHVerifier.SearchItemOnAH(itemId, itemName)
+            print(string.format("|cff00ff88[Profitable]|r Searching AH for [%s]... Click 'Buy Next' again once results load.", itemName or ("Item #" .. itemId)))
+            return false, 0, 0, "SEARCH_STARTED"
+        end
+
+        if bestIdx and bestBuyout then
+            if _G.SetSelectedAuctionItem then
+                pcall(_G.SetSelectedAuctionItem, "list", bestIdx)
+            end
+            pcall(_G.PlaceAuctionBid, "list", bestIdx, bestBuyout)
+            print(string.format(
+                "|cff00ff88[Profitable]|r Buying %dx [%s] for %s (%s ea, max allowed %s ea).",
+                bestCount,
+                itemName or ("Item #" .. itemId),
+                PF.Formatter.FormatMoney(bestBuyout),
+                PF.Formatter.FormatMoney(bestUnitPrice),
+                PF.Formatter.FormatMoney(maxUnitPrice or bestUnitPrice)
+            ))
+            return true, bestCount, bestBuyout, "BOUGHT"
+        else
+            print(string.format(
+                "|cffff5555[Profitable]|r No listings on current page for [%s] at or below max price %s.",
+                itemName or ("Item #" .. itemId),
+                PF.Formatter.FormatMoney(maxUnitPrice or 0)
+            ))
+            return false, 0, 0, "NO_CHEAP_LISTING"
+        end
+    end
+
+    -- 3. Modern C_AuctionHouse Commodity / Item Buyout Path
+    if _G.C_AuctionHouse then
+        if _G.C_AuctionHouse.GetNumCommoditySearchResults and _G.C_AuctionHouse.GetCommoditySearchResultInfo and _G.C_AuctionHouse.StartCommoditiesPurchase then
+            local okNum, num = pcall(_G.C_AuctionHouse.GetNumCommoditySearchResults, itemId)
+            if okNum and num and num > 0 then
+                local okRow, row = pcall(_G.C_AuctionHouse.GetCommoditySearchResultInfo, itemId, 1)
+                if okRow and type(row) == "table" and row.unitPrice and (not maxUnitPrice or row.unitPrice <= maxUnitPrice) then
+                    local buyQty = math.min(neededQty, row.quantity or neededQty)
+                    pcall(_G.C_AuctionHouse.StartCommoditiesPurchase, itemId, buyQty)
+                    if _G.C_AuctionHouse.ConfirmCommoditiesPurchase then
+                        pcall(_G.C_AuctionHouse.ConfirmCommoditiesPurchase, itemId, buyQty)
+                    end
+                    return true, buyQty, row.unitPrice * buyQty, "BOUGHT"
+                end
+            end
+        end
+        PF.AHVerifier.SearchItemOnAH(itemId, itemName)
+        return false, 0, 0, "SEARCH_STARTED"
+    end
+
+    return false
+end
+
 function PF.AHVerifier.Init()
     if PF.AHVerifier._initialized then return end
     PF.AHVerifier._initialized = true

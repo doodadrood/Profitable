@@ -221,9 +221,12 @@ function PF.SideWindow.RefreshRows()
             btn:Show()
             local line1 = PF.OpportunityEngine.FormatOpportunityLine(i, opp)
             local verTag = opp.verified and "|cff00ff00[Verified]|r" or "|cffffcc00[Cached]|r"
+            local recTag = (opp.recipe and opp.recipe.isTrainerRecommendation)
+                and string.format(" |cff00ccff[%s]|r", opp.recipe.sourceHint or "Trainer")
+                or ""
             local line2 = string.format(
-                "   Qty: %dx  |  ROI: %d%%  |  %s  —  |cff88ccffClick to expand|r",
-                opp.quantity or 1, opp.roiPercent or 0, verTag
+                "   Qty: %dx  |  ROI: %d%%  |  %s%s  —  |cff88ccffClick to expand|r",
+                opp.quantity or 1, opp.roiPercent or 0, verTag, recTag
             )
             if btn.mainText then btn.mainText:SetText(line1) end
             if btn.subText then btn.subText:SetText(line2) end

@@ -256,8 +256,12 @@ function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCoppe
     local totalCost = 0
     local totalGrossRevenue = 0
     local totalNetRevenue = 0
+    local totalAHCut = 0
+    local totalDepositRisk = 0
     local unitNetRev = candidate.unitNetRevenue
     local unitGrossRev = candidate.unitGrossRevenue or unitNetRev
+    local unitAHCut = candidate.unitAHCut or math.max(0, unitGrossRev - unitNetRev - (candidate.unitDepositRisk or 0))
+    local unitDeposit = candidate.unitDepositRisk or 0
     local stoppedReason = "MAX_CAP"
 
     while units < maxCap do
@@ -330,6 +334,8 @@ function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCoppe
         totalCost = totalCost + unitCost
         totalGrossRevenue = totalGrossRevenue + unitGrossRev
         totalNetRevenue = totalNetRevenue + unitNetRev
+        totalAHCut = totalAHCut + unitAHCut
+        totalDepositRisk = totalDepositRisk + unitDeposit
 
         for idx, pull in ipairs(pulls) do
             local cur = cursors[idx]
@@ -430,12 +436,16 @@ function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCoppe
         intermediateSteps = intermediateSteps,
         quantity = units,
         outputQuantity = math.floor(units * (candidate.avgMade or 1)),
+        ahCutRate = candidate.ahCutRate or 0,
         unitGrossRevenue = unitGrossRev,
         unitNetRevenue = unitNetRev,
+        unitAHCut = unitAHCut,
+        unitDepositRisk = unitDeposit,
         totalCost = totalCost,
         totalGrossRevenue = totalGrossRevenue,
         totalNetRevenue = totalNetRevenue,
-        totalAHCut = math.max(0, totalGrossRevenue - totalNetRevenue),
+        totalAHCut = totalAHCut,
+        totalDepositRisk = totalDepositRisk,
         totalProfit = totalProfit,
         roiPercent = roiPercent,
         stoppedReason = stoppedReason,
@@ -485,16 +495,28 @@ function PF.OpportunityEngine.BuildDetailedExplanation(opp)
         local unitCost = PF.Formatter.FormatMoney(math.floor(opp.totalCost / math.max(1, opp.quantity)))
         local ahGross = PF.Formatter.FormatMoney(opp.unitGrossRevenue)
         local ahNet = PF.Formatter.FormatMoney(opp.unitNetRevenue)
+        local cutPct = math.floor(((opp.ahCutRate or 0.05) * 100) + 0.5)
+        local depNote = (opp.unitDepositRisk and opp.unitDepositRisk > 0)
+            and string.format(" and %s est. relist deposit", PF.Formatter.FormatMoney(opp.unitDepositRisk))
+            or ""
         table.insert(lines, string.format(
-            "Purchase materials to craft %dx %s (%s) at %s per craft and list on the Auction House for %s (%s net after 5%% AH cut).",
-            opp.quantity, opp.itemLink, (opp.recipe and opp.recipe.profession) or "Crafting", unitCost, ahGross, ahNet
+            "Purchase materials to craft %dx %s (%s) at %s per craft and list on the Auction House for %s (%s net after %d%% AH cut%s).",
+            opp.quantity, opp.itemLink, (opp.recipe and opp.recipe.profession) or "Crafting", unitCost, ahGross, ahNet, cutPct, depNote
         ))
     elseif opp.actionType == "CRAFT_DE" then
         local unitCost = PF.Formatter.FormatMoney(math.floor(opp.totalCost / math.max(1, opp.quantity)))
         local deNet = PF.Formatter.FormatMoney(opp.unitNetRevenue)
+        local cutPct = math.floor(((opp.ahCutRate or 0.05) * 100) + 0.5)
         table.insert(lines, string.format(
-            "Purchase materials to craft %dx %s (%s) at %s per craft, disenchant them, and sell the enchanting materials on the AH for an expected %s net per craft (after 5%% AH cut).",
-            opp.quantity, opp.itemLink, (opp.recipe and opp.recipe.profession) or "Crafting", unitCost, deNet
+            "Purchase materials to craft %dx %s (%s) at %s per craft, disenchant them, and sell the enchanting materials on the AH for an expected %s net per craft (after %d%% AH cut).",
+            opp.quantity, opp.itemLink, (opp.recipe and opp.recipe.profession) or "Crafting", unitCost, deNet, cutPct
+        ))
+    end
+
+    if opp.recipe and opp.recipe.isTrainerRecommendation then
+        table.insert(lines, string.format(
+            "Recipe Source: %s — verify or learn this recipe in your %s window before buying materials.",
+            opp.recipe.sourceHint or "Trainer", opp.recipe.profession or "Profession"
         ))
     end
 
@@ -544,10 +566,12 @@ end
 -- Generates all candidate plays from PCF_DB.prices and character's known recipes
 function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
     local settings = (Profitable_DB and Profitable_DB.settings) or {}
-    local ahCut = settings.ahCutRate or 0.05
+    local ahCut = (PF.GetEffectiveAHCutRate and PF.GetEffectiveAHCutRate()) or settings.ahCutRate or 0.05
     local maxVendorUnits = settings.maxVendorUnits or 200
     local maxDEUnits = settings.maxDEUnits or 50
     local maxAHCraftUnits = settings.maxAHCraftUnits or 20
+    local maxAHGearUnits = settings.maxAHGearUnits or 3
+    local deductDeposit = (settings.deductExpectedDeposit ~= false)
 
     local resolveAHUnit = function(id)
         local price = PF.OpportunityEngine.ResolveAHPrice(id)
@@ -564,14 +588,17 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                 local itemName = (meta and meta.name) or string.format("Item #%d", itemId)
                 local vendorSell = PF.VendorDatabase.GetVendorSellPrice(itemId)
 
-                -- Strategy A: Direct AH Buy -> Vendor
+                -- Strategy A: Direct AH Buy -> Vendor (No AH cut when selling to vendor)
                 if vendorSell and vendorSell > entry.minBuyout then
                     table.insert(candidates, {
                         actionType = "VENDOR",
                         itemId = itemId,
                         itemName = itemName,
+                        ahCutRate = 0,
                         unitGrossRevenue = vendorSell,
                         unitNetRevenue = vendorSell,
+                        unitAHCut = 0,
+                        unitDepositRisk = 0,
                         maxUnits = maxVendorUnits,
                         rawReagents = {
                             { itemId = itemId, name = itemName, count = 1 },
@@ -579,18 +606,20 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                     })
                 end
 
-                -- Strategy B: Direct AH Buy -> Disenchant
+                -- Strategy B: Direct AH Buy -> Disenchant -> Sell Enchanting Mats on AH (5% AH cut applied!)
                 if PF.DisenchantDatabase.CanDisenchant(itemId) then
                     local deEval = PF.DisenchantDatabase.EvaluateDisenchant(itemId, nil, resolveAHUnit, ahCut)
                     if deEval and deEval.netValue > entry.minBuyout then
-                        -- Only prefer BUY_DE over VENDOR if DE net value beats vendor sell price
                         if not vendorSell or deEval.netValue > vendorSell then
                             table.insert(candidates, {
                                 actionType = "BUY_DE",
                                 itemId = itemId,
                                 itemName = itemName,
+                                ahCutRate = ahCut,
                                 unitGrossRevenue = deEval.grossValue,
                                 unitNetRevenue = deEval.netValue,
+                                unitAHCut = deEval.ahCut or (deEval.grossValue - deEval.netValue),
+                                unitDepositRisk = 0,
                                 deBreakdown = deEval,
                                 maxUnits = maxDEUnits,
                                 rawReagents = {
@@ -612,25 +641,32 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
             local avgMade = (recipe.avgMade and recipe.avgMade > 0) and recipe.avgMade or 1
             local meta = PF.VendorDatabase.GetItemMetadata(outId, recipe.outputLink)
             local itemName = recipe.name or (meta and meta.name) or string.format("Item #%d", outId)
+            local isEquippableGear = meta and (meta.classID == 2 or meta.classID == 4) and (meta.invType and meta.invType ~= "")
 
-            -- Strategy C: Craft and Vendor
+            -- Strategy C: Craft and Vendor (No AH cut)
             local vendorSell = PF.VendorDatabase.GetVendorSellPrice(outId, recipe.outputLink)
             local craftVendorRev = vendorSell and math.floor(vendorSell * avgMade) or 0
 
-            -- Strategy D: Craft and AH
+            -- Strategy D: Craft and AH (Deducts 5% AH cut + expected deposit risk for slow-moving gear)
             local ahUnitPrice = PF.OpportunityEngine.ResolveAHPrice(outId, recipe.outputLink)
             local craftAHGross = ahUnitPrice and math.floor(ahUnitPrice * avgMade) or 0
-            local craftAHNet = ahUnitPrice and math.floor(craftAHGross * (1 - ahCut)) or 0
+            local craftAHCut = ahUnitPrice and math.ceil(craftAHGross * ahCut) or 0
+            local craftDepositRisk = (isEquippableGear and deductDeposit and craftVendorRev > 0)
+                and math.floor(craftVendorRev * 0.15)
+                or 0
+            local craftAHNet = math.max(0, craftAHGross - craftAHCut - craftDepositRisk)
 
-            -- Strategy E: Craft and DE
+            -- Strategy E: Craft and DE (Deducts 5% AH cut on the disenchanted enchanting materials)
             local deEval = nil
             local craftDEGross = 0
             local craftDENet = 0
+            local craftDECut = 0
             if PF.DisenchantDatabase.CanDisenchant(outId, recipe.outputLink) then
                 deEval = PF.DisenchantDatabase.EvaluateDisenchant(outId, recipe.outputLink, resolveAHUnit, ahCut)
                 if deEval then
                     craftDEGross = math.floor(deEval.grossValue * avgMade)
                     craftDENet = math.floor(deEval.netValue * avgMade)
+                    craftDECut = math.max(0, craftDEGross - craftDENet)
                 end
             end
 
@@ -642,8 +678,11 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                     itemLink = recipe.outputLink,
                     recipe = recipe,
                     avgMade = avgMade,
+                    ahCutRate = 0,
                     unitGrossRevenue = craftVendorRev,
                     unitNetRevenue = craftVendorRev,
+                    unitAHCut = 0,
+                    unitDepositRisk = 0,
                     maxUnits = maxVendorUnits,
                     rawReagents = recipe.reagents,
                 })
@@ -657,9 +696,12 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                     itemLink = recipe.outputLink,
                     recipe = recipe,
                     avgMade = avgMade,
+                    ahCutRate = ahCut,
                     unitGrossRevenue = craftAHGross,
                     unitNetRevenue = craftAHNet,
-                    maxUnits = maxAHCraftUnits,
+                    unitAHCut = craftAHCut,
+                    unitDepositRisk = craftDepositRisk,
+                    maxUnits = isEquippableGear and maxAHGearUnits or maxAHCraftUnits,
                     rawReagents = recipe.reagents,
                 })
             end
@@ -673,8 +715,11 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                     recipe = recipe,
                     avgMade = avgMade,
                     deBreakdown = deEval,
+                    ahCutRate = ahCut,
                     unitGrossRevenue = craftDEGross,
                     unitNetRevenue = craftDENet,
+                    unitAHCut = craftDECut,
+                    unitDepositRisk = 0,
                     maxUnits = maxDEUnits,
                     rawReagents = recipe.reagents,
                 })
