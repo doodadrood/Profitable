@@ -1,0 +1,12 @@
+package-as: Profitable
+
+ignore:
+  - Tests
+  - .agents
+  - .antigravity
+  - AGENTS.md
+  - .git
+  - .github
+  - .gitignore
+  - .pkgmeta
+  - README.md

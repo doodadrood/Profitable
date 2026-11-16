@@ -1,0 +1,734 @@
+local _, PF = ...
+PF = type(PF) == "table" and PF or _G.PF or {}
+_G.PF = PF
+
+PF.OpportunityEngine = {}
+
+local ACTION_LABELS = {
+    VENDOR       = "Vendor",
+    BUY_DE       = "Buy and DE",
+    CRAFT_VENDOR = "Craft and Vendor",
+    CRAFT_AH     = "Craft and AH",
+    CRAFT_DE     = "Craft and DE",
+}
+
+PF.OpportunityEngine.ACTION_LABELS = ACTION_LABELS
+
+-- Resolves pure AH unit price and available count without falling back to Vendor sell price
+function PF.OpportunityEngine.ResolveAHPrice(itemId, itemLink)
+    if not itemId or itemId <= 0 then
+        return nil, 0, nil
+    end
+
+    -- 1. Check live verified orderBookCache if fresh (within 10 minutes)
+    if Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[itemId] then
+        local ob = Profitable_DB.orderBookCache[itemId]
+        if type(ob.listings) == "table" and #ob.listings > 0 and (time() - (ob.timestamp or 0)) <= 600 then
+            local totalQty = 0
+            local minUnit = nil
+            for _, tier in ipairs(ob.listings) do
+                if tier.unitPrice and tier.unitPrice > 0 and tier.quantity and tier.quantity > 0 then
+                    totalQty = totalQty + tier.quantity
+                    if not minUnit or tier.unitPrice < minUnit then
+                        minUnit = tier.unitPrice
+                    end
+                end
+            end
+            if minUnit and totalQty > 0 then
+                return minUnit, totalQty, "Verified AH"
+            end
+        end
+    end
+
+    -- 2. Check PCF_DB.prices directly (gives both minBuyout and scanned count)
+    if _G.PCF_DB and type(_G.PCF_DB.prices) == "table" and _G.PCF_DB.prices[itemId] then
+        local entry = _G.PCF_DB.prices[itemId]
+        if entry.minBuyout and entry.minBuyout > 0 then
+            local count = (entry.count and entry.count > 0) and entry.count or 1
+            return entry.minBuyout, count, entry.source or "PCF Scan"
+        end
+    end
+
+    -- 3. Fallback to PCF.ProviderRegistry.ResolveAHPrice (TSM / Auctionator)
+    if _G.PCF and _G.PCF.ProviderRegistry and _G.PCF.ProviderRegistry.ResolveAHPrice then
+        local ok, ahPrice, ahSource = pcall(_G.PCF.ProviderRegistry.ResolveAHPrice, itemLink, itemId)
+        if ok and type(ahPrice) == "number" and ahPrice > 0 then
+            local count = (_G.PCF_DB and _G.PCF_DB.prices and _G.PCF_DB.prices[itemId] and _G.PCF_DB.prices[itemId].count) or 20
+            return math.floor(ahPrice), math.max(1, count), ahSource or "External AH"
+        end
+    end
+
+    return nil, 0, nil
+end
+
+-- Returns an ascending-price array of { unitPrice = number, quantity = number }
+function PF.OpportunityEngine.GetOrderBook(itemId, customOrderBooks)
+    if not itemId or itemId <= 0 then
+        return {}
+    end
+
+    local rawListings = nil
+    if type(customOrderBooks) == "table" and type(customOrderBooks[itemId]) == "table" then
+        rawListings = customOrderBooks[itemId]
+    elseif Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[itemId] then
+        local ob = Profitable_DB.orderBookCache[itemId]
+        if type(ob.listings) == "table" and #ob.listings > 0 and (time() - (ob.timestamp or 0)) <= 600 then
+            rawListings = ob.listings
+        end
+    end
+
+    if type(rawListings) == "table" then
+        -- Merge identical price tiers and sort ascending by unitPrice
+        local byPrice = {}
+        local tiers = {}
+        for _, row in ipairs(rawListings) do
+            local up = row and row.unitPrice and math.floor(row.unitPrice)
+            local qty = row and row.quantity and math.floor(row.quantity)
+            if up and up > 0 and qty and qty > 0 then
+                if not byPrice[up] then
+                    byPrice[up] = { unitPrice = up, quantity = qty }
+                    table.insert(tiers, byPrice[up])
+                else
+                    byPrice[up].quantity = byPrice[up].quantity + qty
+                end
+            end
+        end
+        table.sort(tiers, function(a, b) return a.unitPrice < b.unitPrice end)
+        return tiers
+    end
+
+    local unitPrice, count = PF.OpportunityEngine.ResolveAHPrice(itemId)
+    if unitPrice and unitPrice > 0 and count and count > 0 then
+        return {
+            { unitPrice = unitPrice, quantity = count }
+        }
+    end
+
+    return {}
+end
+
+-- Resolves whether a reagent is cheapest from Vendor, direct AH, or Intermediate Crafting
+local function ResolveReagentPlan(reagentList, customOrderBooks)
+    local expanded = {}
+    local intermediateSteps = {}
+    local allowIntermediate = not (Profitable_DB and Profitable_DB.settings and Profitable_DB.settings.useIntermediateCrafting == false)
+
+    local function AddExpandedReagent(itemId, count, name, link)
+        local vendorBuy = PF.VendorDatabase.GetVendorBuyPrice(itemId)
+        local ahUnit, ahCount = PF.OpportunityEngine.ResolveAHPrice(itemId, link)
+
+        local source = "AH"
+        if vendorBuy and vendorBuy > 0 then
+            if not ahUnit or vendorBuy <= ahUnit then
+                source = "Vendor"
+            end
+        end
+
+        for _, existing in ipairs(expanded) do
+            if existing.itemId == itemId and existing.source == source then
+                existing.countPerUnit = existing.countPerUnit + count
+                return
+            end
+        end
+
+        local meta = PF.VendorDatabase.GetItemMetadata(itemId, link)
+        local resolvedName = name or (meta and meta.name) or string.format("Item #%d", itemId)
+        table.insert(expanded, {
+            itemId = itemId,
+            name = resolvedName,
+            link = PF.Formatter.BuildItemLink(itemId, resolvedName, meta and meta.quality, link),
+            countPerUnit = count,
+            source = source,
+            vendorUnitPrice = (source == "Vendor") and vendorBuy or nil,
+        })
+    end
+
+    for _, r in ipairs(reagentList) do
+        local itemId = r.itemId
+        local countNeeded = r.count or r.countPerUnit or 1
+        local vendorBuy = PF.VendorDatabase.GetVendorBuyPrice(itemId)
+
+        if vendorBuy and vendorBuy > 0 then
+            AddExpandedReagent(itemId, countNeeded, r.name, r.link)
+        else
+            local directBook = PF.OpportunityEngine.GetOrderBook(itemId, customOrderBooks)
+            local directUnitPrice = (#directBook > 0) and directBook[1].unitPrice or nil
+            local usedIntermediate = false
+
+            if allowIntermediate and PF.RecipeScanner and PF.RecipeScanner.GetIntermediateRecipeForItem then
+                local interRecipe = PF.RecipeScanner.GetIntermediateRecipeForItem(itemId)
+                if interRecipe and interRecipe.reagents and #interRecipe.reagents > 0 then
+                    local avgMade = (interRecipe.avgMade and interRecipe.avgMade > 0) and interRecipe.avgMade or 1
+                    local subCost = 0
+                    local subAvailable = true
+                    for _, subR in ipairs(interRecipe.reagents) do
+                        local subVendor = PF.VendorDatabase.GetVendorBuyPrice(subR.itemId)
+                        local subBook = PF.OpportunityEngine.GetOrderBook(subR.itemId, customOrderBooks)
+                        local subUnit = subVendor or ((#subBook > 0) and subBook[1].unitPrice) or nil
+                        if subUnit and subUnit > 0 then
+                            subCost = subCost + (subUnit * subR.count)
+                        else
+                            subAvailable = false
+                            break
+                        end
+                    end
+                    local craftUnitCost = subAvailable and math.ceil(subCost / avgMade) or nil
+                    if craftUnitCost and (not directUnitPrice or craftUnitCost < directUnitPrice) then
+                        usedIntermediate = true
+                        local batchesPerCraft = countNeeded / avgMade
+                        table.insert(intermediateSteps, {
+                            recipeName = interRecipe.name,
+                            profession = interRecipe.profession,
+                            outputItemId = itemId,
+                            countPerUnit = countNeeded,
+                        })
+                        for _, subR in ipairs(interRecipe.reagents) do
+                            local rawCount = math.ceil(subR.count * batchesPerCraft)
+                            AddExpandedReagent(subR.itemId, rawCount, subR.name, subR.link)
+                        end
+                    end
+                end
+            end
+
+            if not usedIntermediate then
+                AddExpandedReagent(itemId, countNeeded, r.name, r.link)
+            end
+        end
+    end
+
+    return expanded, intermediateSteps
+end
+
+-- Core Stepped Order-Book Calculator
+-- Walks unit-by-unit through each reagent's AH order book, stopping as soon as:
+-- 1. AH supply runs out for any required reagent
+-- 2. Next unit's marginal cost >= marginal net revenue (no longer profitable to buy deeper listings!)
+-- 3. Next unit's marginal cost exceeds remaining player gold budget
+function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCopper, customOrderBooks)
+    if not candidate or not candidate.unitNetRevenue or candidate.unitNetRevenue <= 0 then
+        return nil
+    end
+
+    local settings = (Profitable_DB and Profitable_DB.settings) or {}
+    local maxCap = candidate.maxUnits or 50
+    local reagents, intermediateSteps = ResolveReagentPlan(candidate.rawReagents or {}, customOrderBooks)
+    if #reagents == 0 then
+        return nil
+    end
+
+    -- Build mutable cursors over each reagent's order book
+    local cursors = {}
+    for idx, r in ipairs(reagents) do
+        if r.source == "Vendor" then
+            cursors[idx] = {
+                source = "Vendor",
+                vendorPrice = r.vendorUnitPrice,
+                tiersUsed = {},
+                totalQty = 0,
+                totalCost = 0,
+                minUnitPrice = r.vendorUnitPrice,
+                maxUnitPrice = r.vendorUnitPrice,
+            }
+        else
+            local tiers = PF.OpportunityEngine.GetOrderBook(r.itemId, customOrderBooks)
+            if #tiers == 0 then
+                return nil -- Missing AH listing for required reagent
+            end
+            local copyTiers = {}
+            for _, t in ipairs(tiers) do
+                table.insert(copyTiers, { unitPrice = t.unitPrice, remaining = t.quantity })
+            end
+            cursors[idx] = {
+                source = "AH",
+                tiers = copyTiers,
+                tierIdx = 1,
+                tiersUsed = {},
+                tiersUsedByPrice = {},
+                totalQty = 0,
+                totalCost = 0,
+                minUnitPrice = nil,
+                maxUnitPrice = nil,
+            }
+        end
+    end
+
+    local units = 0
+    local totalCost = 0
+    local totalGrossRevenue = 0
+    local totalNetRevenue = 0
+    local unitNetRev = candidate.unitNetRevenue
+    local unitGrossRev = candidate.unitGrossRevenue or unitNetRev
+    local stoppedReason = "MAX_CAP"
+
+    while units < maxCap do
+        -- Simulate pulling 1 more unit's worth of reagents from the cursors
+        local unitCost = 0
+        local pulls = {}
+        local supplyExhausted = false
+
+        for idx, r in ipairs(reagents) do
+            local needed = r.countPerUnit
+            local cur = cursors[idx]
+
+            if cur.source == "Vendor" then
+                local cost = needed * cur.vendorPrice
+                unitCost = unitCost + cost
+                pulls[idx] = { isVendor = true, qty = needed, cost = cost, price = cur.vendorPrice }
+            else
+                local simTierIdx = cur.tierIdx
+                local remNeeded = needed
+                local simSlices = {}
+                local reagentCost = 0
+
+                while remNeeded > 0 do
+                    local tier = cur.tiers[simTierIdx]
+                    if not tier then
+                        supplyExhausted = true
+                        break
+                    end
+                    if tier.remaining <= 0 then
+                        simTierIdx = simTierIdx + 1
+                    else
+                        local take = math.min(remNeeded, tier.remaining)
+                        table.insert(simSlices, { tierIdx = simTierIdx, take = take, unitPrice = tier.unitPrice })
+                        reagentCost = reagentCost + (take * tier.unitPrice)
+                        remNeeded = remNeeded - take
+                        if take == tier.remaining then
+                            simTierIdx = simTierIdx + 1
+                        end
+                    end
+                end
+
+                if supplyExhausted then
+                    break
+                end
+
+                unitCost = unitCost + reagentCost
+                pulls[idx] = { isVendor = false, slices = simSlices, qty = needed, cost = reagentCost }
+            end
+        end
+
+        if supplyExhausted then
+            stoppedReason = "AH_SUPPLY"
+            break
+        end
+
+        -- Stop if marginal cost of this unit is >= marginal net revenue (higher AH tier is unprofitable!)
+        if unitCost >= unitNetRev then
+            stoppedReason = "PRICE_TIER_UNPROFITABLE"
+            break
+        end
+
+        -- Stop if player does not have enough gold for this next unit
+        if budgetCopper and budgetCopper > 0 and (totalCost + unitCost) > budgetCopper then
+            stoppedReason = "BUDGET_LIMIT"
+            break
+        end
+
+        -- Commit this unit's reagent pulls
+        units = units + 1
+        totalCost = totalCost + unitCost
+        totalGrossRevenue = totalGrossRevenue + unitGrossRev
+        totalNetRevenue = totalNetRevenue + unitNetRev
+
+        for idx, pull in ipairs(pulls) do
+            local cur = cursors[idx]
+            cur.totalQty = cur.totalQty + pull.qty
+            cur.totalCost = cur.totalCost + pull.cost
+
+            if not pull.isVendor then
+                for _, slice in ipairs(pull.slices) do
+                    local tier = cur.tiers[slice.tierIdx]
+                    tier.remaining = tier.remaining - slice.take
+                    if tier.remaining <= 0 and cur.tierIdx == slice.tierIdx then
+                        cur.tierIdx = slice.tierIdx + 1
+                    end
+
+                    if not cur.minUnitPrice or slice.unitPrice < cur.minUnitPrice then
+                        cur.minUnitPrice = slice.unitPrice
+                    end
+                    if not cur.maxUnitPrice or slice.unitPrice > cur.maxUnitPrice then
+                        cur.maxUnitPrice = slice.unitPrice
+                    end
+
+                    local usedEntry = cur.tiersUsedByPrice[slice.unitPrice]
+                    if not usedEntry then
+                        usedEntry = { unitPrice = slice.unitPrice, quantity = slice.take }
+                        cur.tiersUsedByPrice[slice.unitPrice] = usedEntry
+                        table.insert(cur.tiersUsed, usedEntry)
+                    else
+                        usedEntry.quantity = usedEntry.quantity + slice.take
+                    end
+                end
+            else
+                if #cur.tiersUsed == 0 then
+                    table.insert(cur.tiersUsed, { unitPrice = pull.price, quantity = pull.qty })
+                else
+                    cur.tiersUsed[1].quantity = cur.tiersUsed[1].quantity + pull.qty
+                end
+            end
+        end
+    end
+
+    if units <= 0 then
+        return nil
+    end
+
+    local totalProfit = totalNetRevenue - totalCost
+    local minProfit = settings.minProfitCopper or 100
+    if totalProfit < minProfit then
+        return nil
+    end
+
+    local roiPercent = (totalCost > 0) and math.floor(((totalProfit / totalCost) * 100) + 0.5) or 0
+    local minROI = settings.minROIPercent or 5
+    if roiPercent < minROI then
+        return nil
+    end
+
+    -- Assemble shopping list items with exact stepped quantities and prices
+    local shoppingList = {}
+    for idx, r in ipairs(reagents) do
+        local cur = cursors[idx]
+        local avgUnit = (cur.totalQty > 0) and math.floor((cur.totalCost / cur.totalQty) + 0.5) or 0
+        local inBags = PF.Formatter.GetInventoryCount(r.itemId, false)
+        local inBank = math.max(0, PF.Formatter.GetInventoryCount(r.itemId, true) - inBags)
+
+        table.insert(shoppingList, {
+            itemId = r.itemId,
+            name = r.name,
+            link = r.link,
+            source = r.source,
+            countPerUnit = r.countPerUnit,
+            totalQuantity = cur.totalQty,
+            haveInBags = inBags,
+            haveInBank = inBank,
+            remainingToBuy = math.max(0, cur.totalQty - inBags),
+            totalCost = cur.totalCost,
+            minUnitPrice = cur.minUnitPrice or avgUnit,
+            maxUnitPrice = cur.maxUnitPrice or avgUnit,
+            avgUnitPrice = avgUnit,
+            tiersUsed = cur.tiersUsed,
+        })
+    end
+
+    local actionLabel = ACTION_LABELS[candidate.actionType] or candidate.actionType
+    local meta = PF.VendorDatabase.GetItemMetadata(candidate.itemId, candidate.itemLink)
+    local itemName = candidate.itemName or (meta and meta.name) or string.format("Item #%d", candidate.itemId)
+    local itemLink = PF.Formatter.BuildItemLink(candidate.itemId, itemName, meta and meta.quality, candidate.itemLink)
+
+    return {
+        id = string.format("%s:%d", tostring(candidate.actionType), candidate.itemId),
+        actionType = candidate.actionType,
+        actionLabel = actionLabel,
+        itemId = candidate.itemId,
+        itemName = itemName,
+        itemLink = itemLink,
+        texture = meta and meta.texture,
+        recipe = candidate.recipe,
+        deBreakdown = candidate.deBreakdown,
+        intermediateSteps = intermediateSteps,
+        quantity = units,
+        outputQuantity = math.floor(units * (candidate.avgMade or 1)),
+        unitGrossRevenue = unitGrossRev,
+        unitNetRevenue = unitNetRev,
+        totalCost = totalCost,
+        totalGrossRevenue = totalGrossRevenue,
+        totalNetRevenue = totalNetRevenue,
+        totalAHCut = math.max(0, totalGrossRevenue - totalNetRevenue),
+        totalProfit = totalProfit,
+        roiPercent = roiPercent,
+        stoppedReason = stoppedReason,
+        shoppingList = shoppingList,
+        verified = (candidate.verified == true),
+    }
+end
+
+function PF.OpportunityEngine.FormatOpportunityLine(rank, opp)
+    if not opp then return "" end
+    local costStr = PF.Formatter.FormatMoneyShort(opp.totalCost)
+    local profitStr = PF.Formatter.FormatMoneyShort(opp.totalProfit)
+    if rank and rank > 0 then
+        return string.format("%d. %s %s (Cost %s, Profit %s)", rank, opp.actionLabel, opp.itemLink, costStr, profitStr)
+    end
+    return string.format("%s %s (Cost %s, Profit %s)", opp.actionLabel, opp.itemLink, costStr, profitStr)
+end
+
+function PF.OpportunityEngine.BuildDetailedExplanation(opp)
+    if not opp then return "" end
+    local lines = {}
+
+    if opp.actionType == "VENDOR" then
+        local shop = opp.shoppingList and opp.shoppingList[1]
+        local vendorUnit = PF.Formatter.FormatMoney(opp.unitNetRevenue)
+        local avgBuy = shop and PF.Formatter.FormatMoney(shop.avgUnitPrice) or "0c"
+        table.insert(lines, string.format(
+            "Buy %dx %s on the Auction House (avg %s each) and sell directly to any NPC vendor for %s each.",
+            opp.quantity, opp.itemLink, avgBuy, vendorUnit
+        ))
+    elseif opp.actionType == "BUY_DE" then
+        local shop = opp.shoppingList and opp.shoppingList[1]
+        local avgBuy = shop and PF.Formatter.FormatMoney(shop.avgUnitPrice) or "0c"
+        local deVal = PF.Formatter.FormatMoney(opp.unitNetRevenue)
+        table.insert(lines, string.format(
+            "Buy %dx %s on the AH (avg %s each), disenchant on your enchanter/bank alt, and sell the resulting enchanting materials on the AH for an expected %s net per item (after 5%% AH cut).",
+            opp.quantity, opp.itemLink, avgBuy, deVal
+        ))
+    elseif opp.actionType == "CRAFT_VENDOR" then
+        local unitCost = PF.Formatter.FormatMoney(math.floor(opp.totalCost / math.max(1, opp.quantity)))
+        local vendorUnit = PF.Formatter.FormatMoney(opp.unitNetRevenue)
+        table.insert(lines, string.format(
+            "Purchase materials to craft %dx %s (%s) at %s per craft and sell the crafted items directly to any NPC vendor for %s per craft (instant guaranteed gold, no AH cut).",
+            opp.quantity, opp.itemLink, (opp.recipe and opp.recipe.profession) or "Crafting", unitCost, vendorUnit
+        ))
+    elseif opp.actionType == "CRAFT_AH" then
+        local unitCost = PF.Formatter.FormatMoney(math.floor(opp.totalCost / math.max(1, opp.quantity)))
+        local ahGross = PF.Formatter.FormatMoney(opp.unitGrossRevenue)
+        local ahNet = PF.Formatter.FormatMoney(opp.unitNetRevenue)
+        table.insert(lines, string.format(
+            "Purchase materials to craft %dx %s (%s) at %s per craft and list on the Auction House for %s (%s net after 5%% AH cut).",
+            opp.quantity, opp.itemLink, (opp.recipe and opp.recipe.profession) or "Crafting", unitCost, ahGross, ahNet
+        ))
+    elseif opp.actionType == "CRAFT_DE" then
+        local unitCost = PF.Formatter.FormatMoney(math.floor(opp.totalCost / math.max(1, opp.quantity)))
+        local deNet = PF.Formatter.FormatMoney(opp.unitNetRevenue)
+        table.insert(lines, string.format(
+            "Purchase materials to craft %dx %s (%s) at %s per craft, disenchant them, and sell the enchanting materials on the AH for an expected %s net per craft (after 5%% AH cut).",
+            opp.quantity, opp.itemLink, (opp.recipe and opp.recipe.profession) or "Crafting", unitCost, deNet
+        ))
+    end
+
+    -- Describe stepped AH listing tiers if multiple price tiers are used
+    if opp.shoppingList then
+        for _, shop in ipairs(opp.shoppingList) do
+            if shop.source == "AH" and shop.tiersUsed and #shop.tiersUsed > 1 then
+                local tierParts = {}
+                for _, t in ipairs(shop.tiersUsed) do
+                    table.insert(tierParts, string.format("%dx @ %s", t.quantity, PF.Formatter.FormatMoney(t.unitPrice)))
+                end
+                table.insert(lines, string.format(
+                    "Stepped AH Pricing for %s: %s (stop buying above %s each).",
+                    shop.name, table.concat(tierParts, ", "), PF.Formatter.FormatMoney(shop.maxUnitPrice)
+                ))
+            end
+        end
+    end
+
+    -- Describe intermediate conversions if any
+    if opp.intermediateSteps and #opp.intermediateSteps > 0 then
+        for _, step in ipairs(opp.intermediateSteps) do
+            table.insert(lines, string.format(
+                "Intermediate Step (%s): Craft %dx %s per unit from raw materials instead of buying overpriced bolts/bars.",
+                step.profession or "Craft", step.countPerUnit or 1, step.recipeName or "intermediate material"
+            ))
+        end
+    end
+
+    -- Describe Disenchant expected drops if applicable
+    if opp.deBreakdown and opp.deBreakdown.drops and #opp.deBreakdown.drops > 0 then
+        local dropParts = {}
+        for _, d in ipairs(opp.deBreakdown.drops) do
+            local pct = math.floor(d.prob * 100 + 0.5)
+            local extra = d.conversionNote and (" [" .. d.conversionNote .. "]") or ""
+            table.insert(dropParts, string.format(
+                "%d%% %.1fx %s (%s ea%s)",
+                pct, d.avgQty, d.name, PF.Formatter.FormatMoney(d.unitPrice), extra
+            ))
+        end
+        table.insert(lines, "Expected Disenchant Yield: " .. table.concat(dropParts, " + "))
+    end
+
+    return table.concat(lines, "\n\n")
+end
+
+-- Generates all candidate plays from PCF_DB.prices and character's known recipes
+function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
+    local settings = (Profitable_DB and Profitable_DB.settings) or {}
+    local ahCut = settings.ahCutRate or 0.05
+    local maxVendorUnits = settings.maxVendorUnits or 200
+    local maxDEUnits = settings.maxDEUnits or 50
+    local maxAHCraftUnits = settings.maxAHCraftUnits or 20
+
+    local resolveAHUnit = function(id)
+        local price = PF.OpportunityEngine.ResolveAHPrice(id)
+        return price
+    end
+
+    local candidates = {}
+
+    -- 1. Scan all items in PCF_DB.prices for direct VENDOR and BUY_DE plays
+    if _G.PCF_DB and type(_G.PCF_DB.prices) == "table" then
+        for itemId, entry in pairs(_G.PCF_DB.prices) do
+            if type(itemId) == "number" and itemId > 0 and entry and entry.minBuyout and entry.minBuyout > 0 then
+                local meta = PF.VendorDatabase.GetItemMetadata(itemId)
+                local itemName = (meta and meta.name) or string.format("Item #%d", itemId)
+                local vendorSell = PF.VendorDatabase.GetVendorSellPrice(itemId)
+
+                -- Strategy A: Direct AH Buy -> Vendor
+                if vendorSell and vendorSell > entry.minBuyout then
+                    table.insert(candidates, {
+                        actionType = "VENDOR",
+                        itemId = itemId,
+                        itemName = itemName,
+                        unitGrossRevenue = vendorSell,
+                        unitNetRevenue = vendorSell,
+                        maxUnits = maxVendorUnits,
+                        rawReagents = {
+                            { itemId = itemId, name = itemName, count = 1 },
+                        },
+                    })
+                end
+
+                -- Strategy B: Direct AH Buy -> Disenchant
+                if PF.DisenchantDatabase.CanDisenchant(itemId) then
+                    local deEval = PF.DisenchantDatabase.EvaluateDisenchant(itemId, nil, resolveAHUnit, ahCut)
+                    if deEval and deEval.netValue > entry.minBuyout then
+                        -- Only prefer BUY_DE over VENDOR if DE net value beats vendor sell price
+                        if not vendorSell or deEval.netValue > vendorSell then
+                            table.insert(candidates, {
+                                actionType = "BUY_DE",
+                                itemId = itemId,
+                                itemName = itemName,
+                                unitGrossRevenue = deEval.grossValue,
+                                unitNetRevenue = deEval.netValue,
+                                deBreakdown = deEval,
+                                maxUnits = maxDEUnits,
+                                rawReagents = {
+                                    { itemId = itemId, name = itemName, count = 1 },
+                                },
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2. Scan all known crafting recipes for CRAFT_VENDOR, CRAFT_AH, and CRAFT_DE plays
+    local recipes = PF.RecipeScanner and PF.RecipeScanner.GetKnownRecipes() or {}
+    for _, recipe in ipairs(recipes) do
+        local outId = recipe.outputItemId
+        if outId and outId > 0 and type(recipe.reagents) == "table" and #recipe.reagents > 0 then
+            local avgMade = (recipe.avgMade and recipe.avgMade > 0) and recipe.avgMade or 1
+            local meta = PF.VendorDatabase.GetItemMetadata(outId, recipe.outputLink)
+            local itemName = recipe.name or (meta and meta.name) or string.format("Item #%d", outId)
+
+            -- Strategy C: Craft and Vendor
+            local vendorSell = PF.VendorDatabase.GetVendorSellPrice(outId, recipe.outputLink)
+            local craftVendorRev = vendorSell and math.floor(vendorSell * avgMade) or 0
+
+            -- Strategy D: Craft and AH
+            local ahUnitPrice = PF.OpportunityEngine.ResolveAHPrice(outId, recipe.outputLink)
+            local craftAHGross = ahUnitPrice and math.floor(ahUnitPrice * avgMade) or 0
+            local craftAHNet = ahUnitPrice and math.floor(craftAHGross * (1 - ahCut)) or 0
+
+            -- Strategy E: Craft and DE
+            local deEval = nil
+            local craftDEGross = 0
+            local craftDENet = 0
+            if PF.DisenchantDatabase.CanDisenchant(outId, recipe.outputLink) then
+                deEval = PF.DisenchantDatabase.EvaluateDisenchant(outId, recipe.outputLink, resolveAHUnit, ahCut)
+                if deEval then
+                    craftDEGross = math.floor(deEval.grossValue * avgMade)
+                    craftDENet = math.floor(deEval.netValue * avgMade)
+                end
+            end
+
+            if craftVendorRev > 0 then
+                table.insert(candidates, {
+                    actionType = "CRAFT_VENDOR",
+                    itemId = outId,
+                    itemName = itemName,
+                    itemLink = recipe.outputLink,
+                    recipe = recipe,
+                    avgMade = avgMade,
+                    unitGrossRevenue = craftVendorRev,
+                    unitNetRevenue = craftVendorRev,
+                    maxUnits = maxVendorUnits,
+                    rawReagents = recipe.reagents,
+                })
+            end
+
+            if craftAHNet > 0 then
+                table.insert(candidates, {
+                    actionType = "CRAFT_AH",
+                    itemId = outId,
+                    itemName = itemName,
+                    itemLink = recipe.outputLink,
+                    recipe = recipe,
+                    avgMade = avgMade,
+                    unitGrossRevenue = craftAHGross,
+                    unitNetRevenue = craftAHNet,
+                    maxUnits = maxAHCraftUnits,
+                    rawReagents = recipe.reagents,
+                })
+            end
+
+            if craftDENet > 0 then
+                table.insert(candidates, {
+                    actionType = "CRAFT_DE",
+                    itemId = outId,
+                    itemName = itemName,
+                    itemLink = recipe.outputLink,
+                    recipe = recipe,
+                    avgMade = avgMade,
+                    deBreakdown = deEval,
+                    unitGrossRevenue = craftDEGross,
+                    unitNetRevenue = craftDENet,
+                    maxUnits = maxDEUnits,
+                    rawReagents = recipe.reagents,
+                })
+            end
+        end
+    end
+
+    return candidates
+end
+
+-- Evaluates and ranks opportunities within the player's current gold budget
+function PF.OpportunityEngine.FindTopOpportunities(budgetOverride, customOrderBooks, limitOverride)
+    local budget = (type(budgetOverride) == "number" and budgetOverride >= 0)
+        and budgetOverride
+        or PF.Formatter.GetPlayerGold()
+    local topLimit = limitOverride or ((Profitable_DB and Profitable_DB.settings and Profitable_DB.settings.topCount) or 5)
+
+    local candidates = PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
+    local bestByItem = {}
+
+    for _, cand in ipairs(candidates) do
+        local opp = PF.OpportunityEngine.CalculateSteppedOpportunity(cand, budget, customOrderBooks)
+        if opp and opp.totalProfit > 0 then
+            -- Keep the highest-profit play per target output item so we don't list both
+            -- "Craft and Vendor [X]" and "Craft and DE [X]" for the exact same item
+            local existing = bestByItem[opp.itemId]
+            if not existing or opp.totalProfit > existing.totalProfit then
+                bestByItem[opp.itemId] = opp
+            end
+        end
+    end
+
+    local ranked = {}
+    for _, opp in pairs(bestByItem) do
+        table.insert(ranked, opp)
+    end
+
+    table.sort(ranked, function(a, b)
+        if a.totalProfit ~= b.totalProfit then
+            return a.totalProfit > b.totalProfit
+        end
+        if a.roiPercent ~= b.roiPercent then
+            return a.roiPercent > b.roiPercent
+        end
+        return a.itemId < b.itemId
+    end)
+
+    local results = {}
+    for i = 1, math.min(#ranked, topLimit) do
+        ranked[i].rank = i
+        ranked[i].summaryLine = PF.OpportunityEngine.FormatOpportunityLine(i, ranked[i])
+        ranked[i].explanation = PF.OpportunityEngine.BuildDetailedExplanation(ranked[i])
+        table.insert(results, ranked[i])
+    end
+
+    return results, ranked
+end

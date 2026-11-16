@@ -1,0 +1,19 @@
+## Interface: 16001
+## Title: Profitable |cff00ff88(PF)|r
+## Notes: Finds the top 5 most profitable AH, Vendor, Crafting, and Disenchanting plays using PriceCheckerForever data and live order-book verification.
+## Author: PCF Dev Team
+## Version: 1.0.0
+## SavedVariables: Profitable_DB
+## Dependencies: PriceCheckerForever
+## OptionalDeps: TradeSkillMaster, Auctionator
+
+Config.lua
+Utils/Formatter.lua
+Data/VendorDatabase.lua
+Data/DisenchantDatabase.lua
+Modules/RecipeScanner.lua
+Modules/OpportunityEngine.lua
+Modules/AHVerifier.lua
+UI/DetailWindow.lua
+UI/SideWindow.lua
+Core.lua
