@@ -281,6 +281,13 @@ function PF.DetailWindow.ShowOpportunity(opp)
 
     local frame = EnsureDetailFrame()
     frame:Show()
+
+    -- Automatically open the first required AH item in the Default Blizzard AuctionHouseFrame
+    -- so its Buy screen and listings are immediately ready!
+    if PF.AHVerifier and PF.AHVerifier.OpenNextNeededItemInDefaultAH then
+        PF.AHVerifier.OpenNextNeededItemInDefaultAH(opp)
+    end
+
     PF.DetailWindow.RefreshIfShown()
 end
 
