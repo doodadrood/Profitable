@@ -53,6 +53,7 @@ local defaultConfig = {
         spikeCapMultiplier = 1.25,               -- Cap estimated exit revenue to 1.25x 14-day median
         minHistoricalSamples = 3,                -- Require >= 3 hourly snapshots before enforcing spike cap
         mirrorFeedToPCF = true,                  -- Softly fill missing/older PCF_DB prices from MarketFeed when both are active
+        marketFeedVerifySkipSeconds = 7200,      -- Skip live AH query if MarketFeed order book is fresher than 2h (Shift-click forces live)
         showSideWindow = true,
     },
     charRecipes = {},     -- [charKey] = { [recipeKey] = recipeTable }

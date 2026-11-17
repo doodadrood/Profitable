@@ -27,9 +27,10 @@ function PF.MarketFeed.GetFeedAgeSeconds()
     return math.max(0, time() - feed.timestamp)
 end
 
-function PF.MarketFeed.IsFresh()
+function PF.MarketFeed.IsFresh(maxAgeSeconds)
     local age = PF.MarketFeed.GetFeedAgeSeconds()
-    return age ~= nil and age <= MAX_FEED_AGE_SECONDS
+    local limit = (type(maxAgeSeconds) == "number" and maxAgeSeconds > 0) and maxAgeSeconds or MAX_FEED_AGE_SECONDS
+    return age ~= nil and age <= limit
 end
 
 function PF.MarketFeed.GetItemData(itemId)

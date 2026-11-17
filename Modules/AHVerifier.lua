@@ -96,26 +96,37 @@ function PF.AHVerifier.MakeItemKey(itemId)
     return { itemID = itemId, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 }
 end
 
+local function ClearPendingItemKeyWatchers()
+    if next(itemKeyCallbacks) == nil then
+        SafeUnregisterEvent(verifierFrame, "ITEM_KEY_ITEM_INFO_RECEIVED")
+        if verifierFrame.SetScript then
+            verifierFrame:SetScript("OnUpdate", nil)
+        end
+    end
+end
+
 local function PollPendingItemKeys()
     if not _G.C_AuctionHouse or not _G.C_AuctionHouse.GetItemKeyInfo then
         return
     end
-    local anyRemaining = false
+    local ready = {}
     for itemId, callbacks in pairs(itemKeyCallbacks) do
         local key = PF.AHVerifier.MakeItemKey(itemId)
         local ok, info = pcall(_G.C_AuctionHouse.GetItemKeyInfo, key)
         if ok and info then
-            itemKeyCallbacks[itemId] = nil
-            for _, cb in ipairs(callbacks) do
-                pcall(cb, key, info)
-            end
-        else
-            anyRemaining = true
+            table.insert(ready, { itemId = itemId, key = key, info = info, callbacks = callbacks })
         end
     end
-    if not anyRemaining and verifierFrame.SetScript then
-        verifierFrame:SetScript("OnUpdate", nil)
+    for _, entry in ipairs(ready) do
+        itemKeyCallbacks[entry.itemId] = nil
     end
+    ClearPendingItemKeyWatchers()
+    for _, entry in ipairs(ready) do
+        for _, cb in ipairs(entry.callbacks) do
+            pcall(cb, entry.key, entry.info)
+        end
+    end
+    ClearPendingItemKeyWatchers()
 end
 
 function PF.AHVerifier.WithItemKeyInfo(itemId, callback)
@@ -202,6 +213,9 @@ end
 
 local function MarkVerifiedOpportunities(opportunities, verifiedItemMap)
     if type(opportunities) ~= "table" then return end
+    local settings = (Profitable_DB and Profitable_DB.settings) or {}
+    local feedSkipAge = settings.marketFeedVerifySkipSeconds or 7200
+    local feedFreshWindow = PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh(feedSkipAge)
     for _, opp in ipairs(opportunities) do
         local allVerified = true
         if opp.shoppingList then
@@ -209,7 +223,8 @@ local function MarkVerifiedOpportunities(opportunities, verifiedItemMap)
                 if shop.source == "AH" then
                     local ob = Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[shop.itemId]
                     local isFresh = ob and (time() - (ob.timestamp or 0)) <= 600
-                    if not isFresh and not (verifiedItemMap and verifiedItemMap[shop.itemId]) then
+                    local hasFeed = feedFreshWindow and PF.MarketFeed.GetItemData and (PF.MarketFeed.GetItemData(shop.itemId) ~= nil)
+                    if not isFresh and not hasFeed and not (verifiedItemMap and verifiedItemMap[shop.itemId]) then
                         allVerified = false
                         break
                     end
@@ -226,6 +241,8 @@ local function FinalizeRun(reason)
     isRunning = false
     currentQueryItem = nil
     runToken = runToken + 1
+    itemKeyCallbacks = {}
+    ClearPendingItemKeyWatchers()
 
     local topPlays, _, honorableMentions = PF.OpportunityEngine.FindTopOpportunities()
     MarkVerifiedOpportunities(topPlays, verifiedInSession)
@@ -442,6 +459,12 @@ ScheduleNextVerification = function(delay)
                 SafeRegisterEvent(verifierFrame, "ITEM_SEARCH_RESULTS_UPDATED")
                 PF.AHVerifier.WithItemKeyInfo(target.itemId, function(itemKey, itemKeyInfo)
                     if not isRunning or runToken ~= myToken or currentQueryItem ~= target then return end
+                    if _G.C_AuctionHouse.IsThrottledMessageSystemReady and not _G.C_AuctionHouse.IsThrottledMessageSystemReady() then
+                        currentQueryItem = nil
+                        verifyIndex = math.max(0, verifyIndex - 1)
+                        ScheduleNextVerification(0.25)
+                        return
+                    end
                     local sorts = PF.AHVerifier.GetAppropriateSorts(itemKeyInfo)
                     local isItem = (itemKeyInfo and itemKeyInfo.isCommodity == false)
                     pcall(_G.C_AuctionHouse.SendSearchQuery, itemKey, sorts, isItem)
@@ -458,6 +481,19 @@ ScheduleNextVerification = function(delay)
         verifiedInSession[target.itemId] = true
         ScheduleNextVerification(0.01)
     end)
+end
+
+local function EnsureAuctionBuyViewOpen()
+    local ah = _G.AuctionHouseFrame
+    if not ah then return end
+    local sellShown = (ah.CommoditiesSellFrame and ah.CommoditiesSellFrame.IsShown and ah.CommoditiesSellFrame:IsShown())
+        or (ah.ItemSellFrame and ah.ItemSellFrame.IsShown and ah.ItemSellFrame:IsShown())
+    if not sellShown then return end
+    if ah.SetDisplayMode and _G.AuctionHouseFrameDisplayMode and _G.AuctionHouseFrameDisplayMode.Buy then
+        pcall(ah.SetDisplayMode, ah, _G.AuctionHouseFrameDisplayMode.Buy)
+    elseif ah.BuyTab and ah.BuyTab.Click then
+        pcall(ah.BuyTab.Click, ah.BuyTab)
+    end
 end
 
 function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
@@ -477,6 +513,9 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
 
     local settings = (Profitable_DB and Profitable_DB.settings) or {}
     local candidateCount = settings.verifyCandidateCount or 10
+    local forceLiveVerify = (callbacks.forceLiveVerify == true)
+    local feedSkipAge = settings.marketFeedVerifySkipSeconds or 7200
+    local feedFreshWindow = PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh(feedSkipAge)
 
     local initialTop, _, initialHM = PF.OpportunityEngine.FindTopOpportunities(nil, nil, candidateCount)
     local top5, _, hm = PF.OpportunityEngine.FindTopOpportunities()
@@ -489,6 +528,15 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
         if not itemId or itemId <= 0 or queuedIds[itemId] then return end
         if PF.VendorDatabase.IsVendorReagent(itemId) then return end
         queuedIds[itemId] = true
+        if not forceLiveVerify then
+            local ob = Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[itemId]
+            local obFresh = ob and ob.timestamp and (time() - ob.timestamp) <= 600
+            local feedHasItem = feedFreshWindow and PF.MarketFeed.GetItemData and (PF.MarketFeed.GetItemData(itemId) ~= nil)
+            if obFresh or feedHasItem then
+                verifiedInSession[itemId] = true
+                return
+            end
+        end
         local meta = PF.VendorDatabase.GetItemMetadata(itemId)
         local resolvedName = itemName or (meta and meta.name) or string.format("Item #%d", itemId)
         table.insert(verifyQueue, {
@@ -524,6 +572,7 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
         return Profitable_DB.lastTopPlays
     end
 
+    EnsureAuctionBuyViewOpen()
     ScheduleNextVerification(0.05)
     return Profitable_DB.lastTopPlays
 end

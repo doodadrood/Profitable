@@ -136,8 +136,20 @@ local function EnsureSideWindow()
         if PF.AHVerifier.IsRunning() then
             PF.AHVerifier.Stop("USER_ACCEPTED_TOP5")
         else
-            PF.SideWindow.RunSearch()
+            local forceLive = (_G.IsShiftKeyDown and _G.IsShiftKeyDown()) == true
+            PF.SideWindow.RunSearch(forceLive)
         end
+    end)
+    findBtn:SetScript("OnEnter", function(self)
+        if not _G.GameTooltip then return end
+        _G.GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        _G.GameTooltip:AddLine("Find Top 5 Plays", 0, 1, 0.5)
+        _G.GameTooltip:AddLine("Click: Calculate plays using fresh MarketFeed (<2h) and cached AH data.", 1, 1, 1, true)
+        _G.GameTooltip:AddLine("Shift-Click: Force live AH verification queries for all candidates.", 0.7, 0.85, 1, true)
+        _G.GameTooltip:Show()
+    end)
+    findBtn:SetScript("OnLeave", function()
+        if _G.GameTooltip then _G.GameTooltip:Hide() end
     end)
 
     -- Status / Progress Bar
@@ -324,13 +336,14 @@ function PF.SideWindow.Refresh()
     PF.SideWindow.RefreshRows()
 end
 
-function PF.SideWindow.RunSearch()
+function PF.SideWindow.RunSearch(forceLiveVerify)
     EnsureSideWindow()
     sideFrame:Show()
     if sideFrame.findBtn then sideFrame.findBtn:SetText("Accept Top 5 / Stop") end
     if sideFrame.statusText then sideFrame.statusText:SetText("Calculating plays...") end
 
     local plays = PF.AHVerifier.StartDiscoveryAndVerification({
+        forceLiveVerify = (forceLiveVerify == true),
         onUpdate = function(idx, total, target)
             PF.SideWindow.UpdateProgress(idx, total, target)
         end,

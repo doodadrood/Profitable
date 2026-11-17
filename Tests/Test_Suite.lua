@@ -526,7 +526,132 @@ Assert(wasSpiked == true and cappedExit == 18750 and spikeDetails.medianPrice ==
 local feedBook = PF.OpportunityEngine.GetOrderBook(774)
 Assert(#feedBook == 2 and feedBook[1].unitPrice == 150 and feedBook[2].quantity == 15, "OpportunityEngine reads stepped order-book tiers from MarketFeed")
 
--- Clean up Profitable_MarketFeed for clean exit
+-- Clean up Profitable_MarketFeed before AHVerifier skip/throttle regression tests
 _G.Profitable_MarketFeed = nil
+
+-- 17. Test MarketFeed Verification Skip, Force Live Shift-Click, Sell-Frame Tab Guard & ItemKey Cleanup
+do
+    local origSendSearchQuery = _G.C_AuctionHouse.SendSearchQuery
+    local origGetItemKeyInfo = _G.C_AuctionHouse.GetItemKeyInfo
+    local origIsThrottledReady = _G.C_AuctionHouse.IsThrottledMessageSystemReady
+    local origIsAuctionHouseShown = _G.AuctionHouseFrame.IsShown
+    local origDisplayModeEnum = _G.AuctionHouseFrameDisplayMode
+    local origSetDisplayMode = _G.AuctionHouseFrame.SetDisplayMode
+    local origCommSell = _G.AuctionHouseFrame.CommoditiesSellFrame
+
+    _G.AuctionHouseFrame.IsShown = function() return true end
+    local searchCalls = 0
+    _G.C_AuctionHouse.SendSearchQuery = function(...)
+        searchCalls = searchCalls + 1
+    end
+    _G.C_AuctionHouse.IsThrottledMessageSystemReady = function() return true end
+
+    -- Populate fresh MarketFeed (< 2h) covering every AH item in current candidates
+    local topCand, _, hmCand = PF.OpportunityEngine.FindTopOpportunities(nil, nil, 10)
+    local feedItems = {}
+    local function AddFeedEntries(list)
+        if type(list) ~= "table" then return end
+        for _, opp in ipairs(list) do
+            if opp.shoppingList then
+                for _, s in ipairs(opp.shoppingList) do
+                    if s.source == "AH" then
+                        feedItems[s.itemId] = { m = s.unitPrice or 100, q = 20, tiers = { { s.unitPrice or 100, 20 } } }
+                    end
+                end
+            end
+            if opp.actionType == "CRAFT_AH" and opp.itemId then
+                feedItems[opp.itemId] = { m = 5000, q = 5, tiers = { { 5000, 5 } } }
+            end
+        end
+    end
+    AddFeedEntries(topCand)
+    AddFeedEntries(hmCand)
+
+    Profitable_DB.orderBookCache = {}
+    _G.Profitable_MarketFeed = {
+        timestamp = math.floor(Mock.currentTime) - 600, -- 10m old (< 2h default)
+        region = "us",
+        rulesetId = 1,
+        houseId = 113,
+        items = feedItems,
+    }
+
+    Assert(PF.MarketFeed.IsFresh(7200) == true and PF.MarketFeed.IsFresh(300) == false, "MarketFeed.IsFresh supports custom maxAgeSeconds window")
+
+    Mock.timers = {}
+    searchCalls = 0
+    local playsFromFeed = PF.AHVerifier.StartDiscoveryAndVerification()
+    Assert(PF.AHVerifier.IsRunning() == false, "StartDiscoveryAndVerification finishes immediately without live queries when MarketFeed < 2h")
+    Assert(searchCalls == 0, "Normal click skips C_AuctionHouse.SendSearchQuery when items are covered by fresh MarketFeed")
+    Assert(playsFromFeed and playsFromFeed[1] and playsFromFeed[1].verified == true, "Top plays backed by fresh MarketFeed are marked verified")
+
+    -- Shift-click (forceLiveVerify = true) must still run live AH queries AND switch away from CommoditiesSellFrame
+    local switchedDisplayMode = nil
+    _G.AuctionHouseFrameDisplayMode = { Buy = 1, Sell = 2 }
+    _G.AuctionHouseFrame.CommoditiesSellFrame = {
+        shown = true,
+        IsShown = function(self) return self.shown end,
+    }
+    _G.AuctionHouseFrame.SetDisplayMode = function(self, mode)
+        switchedDisplayMode = mode
+        if mode == 1 then self.CommoditiesSellFrame.shown = false end
+    end
+    _G.C_AuctionHouse.GetItemKeyInfo = function(key)
+        return { itemID = key.itemID, isCommodity = true }
+    end
+
+    Mock.timers = {}
+    searchCalls = 0
+    PF.AHVerifier.StartDiscoveryAndVerification({ forceLiveVerify = true })
+    Assert(switchedDisplayMode == 1 and _G.AuctionHouseFrame.CommoditiesSellFrame.shown == false, "Force live verify switches AuctionHouseFrame off CommoditiesSellFrame before querying")
+    Assert(PF.AHVerifier.IsRunning() == true, "forceLiveVerify = true queues live verification even when MarketFeed is loaded")
+    -- Run initial scheduled verification step (do not spin 2.5s fallback timers)
+    local firstTimer = table.remove(Mock.timers, 1)
+    if firstTimer and firstTimer.callback then firstTimer.callback() end
+    Assert(searchCalls == 1, "forceLiveVerify = true sends live C_AuctionHouse.SendSearchQuery")
+    PF.AHVerifier.Stop("TEST_CLEANUP")
+    Mock.timers = {}
+
+    -- Verify re-entrant PollPendingItemKeys invokes callback once and clears watchers cleanly
+    local cached9999 = nil
+    _G.C_AuctionHouse.GetItemKeyInfo = function(key)
+        return (key.itemID == 9999) and cached9999 or nil
+    end
+    local keyCbCalls = 0
+    local wasQueued = not PF.AHVerifier.WithItemKeyInfo(9999, function()
+        keyCbCalls = keyCbCalls + 1
+        PF.AHVerifier.frame:Trigger("ITEM_KEY_ITEM_INFO_RECEIVED", 9999)
+    end)
+    Assert(wasQueued and PF.AHVerifier.frame.events["ITEM_KEY_ITEM_INFO_RECEIVED"] == true and PF.AHVerifier.frame.scripts["OnUpdate"] ~= nil, "Uncached ItemKey registers ITEM_KEY_ITEM_INFO_RECEIVED and OnUpdate")
+    cached9999 = { itemID = 9999, isCommodity = true }
+    PF.AHVerifier.frame:Trigger("ITEM_KEY_ITEM_INFO_RECEIVED", 9999)
+    Assert(keyCbCalls == 1, "PollPendingItemKeys clears itemKeyCallbacks before invoking so re-entrant events cannot double-fire")
+    Assert(PF.AHVerifier.frame.events["ITEM_KEY_ITEM_INFO_RECEIVED"] == nil and PF.AHVerifier.frame.scripts["OnUpdate"] == nil, "PollPendingItemKeys unregisters watchers once queue is empty")
+
+    -- Verify Stop() cancels pending uncached SendSearchQuery callbacks cleanly
+    _G.Profitable_MarketFeed = nil
+    cached9999 = nil
+    searchCalls = 0
+    Mock.timers = {}
+    PF.AHVerifier.StartDiscoveryAndVerification({ forceLiveVerify = true })
+    local stepTimer = table.remove(Mock.timers, 1)
+    if stepTimer and stepTimer.callback then stepTimer.callback() end
+    Assert(searchCalls == 0 and PF.AHVerifier.frame.scripts["OnUpdate"] ~= nil, "Uncached item during live verify waits on ItemKeyInfo instead of querying immediately")
+    PF.AHVerifier.Stop("USER_STOPPED")
+    Assert(PF.AHVerifier.frame.scripts["OnUpdate"] == nil and PF.AHVerifier.frame.events["ITEM_KEY_ITEM_INFO_RECEIVED"] == nil, "Stop() clears pending ItemKey OnUpdate and event watchers")
+    _G.C_AuctionHouse.GetItemKeyInfo = function(key) return { itemID = key.itemID, isCommodity = true } end
+    PF.AHVerifier.frame:Trigger("ITEM_KEY_ITEM_INFO_RECEIVED", 2447)
+    Assert(searchCalls == 0, "Late ITEM_KEY_ITEM_INFO_RECEIVED after Stop() never fires stale SendSearchQuery")
+
+    -- Restore globals
+    _G.Profitable_MarketFeed = nil
+    _G.C_AuctionHouse.SendSearchQuery = origSendSearchQuery
+    _G.C_AuctionHouse.GetItemKeyInfo = origGetItemKeyInfo
+    _G.C_AuctionHouse.IsThrottledMessageSystemReady = origIsThrottledReady
+    _G.AuctionHouseFrame.IsShown = origIsAuctionHouseShown
+    _G.AuctionHouseFrameDisplayMode = origDisplayModeEnum
+    _G.AuctionHouseFrame.SetDisplayMode = origSetDisplayMode
+    _G.AuctionHouseFrame.CommoditiesSellFrame = origCommSell
+end
 
 print("\nAll Profitable test assertions passed successfully!")
