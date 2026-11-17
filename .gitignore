@@ -2,4 +2,6 @@
 *.bak
 *.swp
 *~
+*.pyc
+__pycache__/
 .antigravity/
