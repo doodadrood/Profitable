@@ -23,7 +23,7 @@ local function SetBackdropSafe(frame, bgR, bgG, bgB, bgA)
     end
 end
 
-local function HandleItemLinkClick(itemId, itemName, itemLink)
+local function HandleItemLinkClick(itemId, itemName, itemLink, desiredQuantity)
     if _G.IsModifiedClick and _G.IsModifiedClick("CHATLINK") then
         if _G.ChatEdit_InsertLink and itemLink then
             local inserted = _G.ChatEdit_InsertLink(itemLink)
@@ -42,7 +42,7 @@ local function HandleItemLinkClick(itemId, itemName, itemLink)
     end
 
     if PF.AHVerifier and PF.AHVerifier.IsAuctionHouseOpen and PF.AHVerifier.IsAuctionHouseOpen() then
-        PF.AHVerifier.SearchItemOnAH(itemId, itemName, itemLink)
+        PF.AHVerifier.SearchItemOnAH(itemId, itemName, itemLink, desiredQuantity)
     elseif _G.SetItemRef and itemLink then
         pcall(_G.SetItemRef, "item:" .. tostring(itemId), itemLink, "LeftButton")
     end
@@ -99,7 +99,8 @@ local function CreateShoppingRow(parent, index)
 
     itemBtn:SetScript("OnClick", function()
         if row._itemData then
-            HandleItemLinkClick(row._itemData.itemId, row._itemData.name, row._itemData.link)
+            local rem = math.max(1, row._itemData.remainingToBuy or row._itemData.totalQuantity or 1)
+            HandleItemLinkClick(row._itemData.itemId, row._itemData.name, row._itemData.link, rem)
         end
     end)
     itemBtn:SetScript("OnEnter", function(self)
@@ -113,7 +114,8 @@ local function CreateShoppingRow(parent, index)
 
     searchBtn:SetScript("OnClick", function()
         if row._itemData then
-            PF.AHVerifier.SearchItemOnAH(row._itemData.itemId, row._itemData.name, row._itemData.link)
+            local rem = math.max(1, row._itemData.remainingToBuy or row._itemData.totalQuantity or 1)
+            PF.AHVerifier.SearchItemOnAH(row._itemData.itemId, row._itemData.name, row._itemData.link, rem)
         end
     end)
 
@@ -358,10 +360,16 @@ function PF.DetailWindow.RefreshIfShown()
 
             if row.searchBtn then
                 if item.source == "Vendor" then
-                    row.searchBtn:SetText("Buy Vendor")
+                    row.searchBtn:Hide()
                 else
-                    row.searchBtn:SetText("Search AH")
+                    row.searchBtn:Show()
+                    row.searchBtn:SetText("Open in AH")
                 end
+            end
+
+            if row.buyBtn then
+                local label = (PF.AHVerifier and PF.AHVerifier.GetBuyButtonLabel and PF.AHVerifier.GetBuyButtonLabel(item)) or "Buy Next"
+                row.buyBtn:SetText(label)
             end
         else
             row._itemData = nil

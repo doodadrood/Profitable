@@ -275,10 +275,88 @@ Assert(foundRuneclothBeltTrainer == true, "Recommend Runecloth Belt (Skill 255) 
 
 -- 11. Test Limited-Supply NPC Vendor Arbitrage Alert (after 5% AH cut)
 Mock.merchantItems = {
-    { itemId = 10940, name = "Strange Dust", price = 80, quantity = 1, numAvailable = 5 }, -- 80c at vendor, 200c on AH (190c net after 5% cut) -> +5s 50c profit? Let's make Strange Dust 50s on AH!
+    { itemId = 10940, name = "Strange Dust", price = 80, quantity = 1, numAvailable = 5 }, -- 80c at vendor, 50s on AH (47s 50c net after 5% cut)
 }
 _G.PCF_DB.prices[10940] = { minBuyout = 5000, count = 40, lastUpdated = Mock.currentTime }
 PF.VendorDatabase.ScanOpenMerchant()
 Assert(#Profitable_DB.vendorAlerts == 1 and Profitable_DB.vendorAlerts[1].itemId == 10940 and Profitable_DB.vendorAlerts[1].unitAHNet == 4750, "Detect limited-supply vendor arbitrage opportunity with 5% AH cut deducted")
+
+-- 12. Test Modern C_AuctionHouse + Auctionator Navigation & 2-Step Commodity Purchase Flow
+_G.AuctionHouseFrame = _G.CreateFrame("Frame", "AuctionHouseFrame", _G.UIParent)
+local selectedBrowseRow = nil
+_G.AuctionHouseFrame.SelectBrowseResult = function(self, rowData)
+    selectedBrowseRow = rowData
+end
+
+local startedPurchase = nil
+local confirmedPurchase = nil
+local cancelledPurchase = false
+local itemKeyCache = {}
+
+_G.C_AuctionHouse = {
+    MakeItemKey = function(itemId)
+        return { itemID = itemId, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 }
+    end,
+    GetItemKeyInfo = function(itemKey)
+        return itemKeyCache[itemKey.itemID]
+    end,
+    SendSearchQuery = function(itemKey, sorts, splitOwned)
+        Mock.lastModernSearchKey = itemKey
+    end,
+    GetNumCommoditySearchResults = function(itemId)
+        if itemId == 2447 then return 3 end
+        return 0
+    end,
+    GetCommoditySearchResultInfo = function(itemId, idx)
+        if itemId == 2447 then
+            local tiers = {
+                { unitPrice = 10400, quantity = 5 },  -- 5 @ 1g 04s (<= max 1g 12s)
+                { unitPrice = 11200, quantity = 15 }, -- 15 @ 1g 12s (<= max 1g 12s)
+                { unitPrice = 18000, quantity = 50 }, -- 50 @ 1g 80s (> max 1g 12s, must NOT buy!)
+            }
+            return tiers[idx]
+        end
+        return nil
+    end,
+    StartCommoditiesPurchase = function(itemId, qty)
+        startedPurchase = { itemId = itemId, quantity = qty }
+    end,
+    ConfirmCommoditiesPurchase = function(itemId, qty)
+        confirmedPurchase = { itemId = itemId, quantity = qty }
+    end,
+    CancelCommoditiesPurchase = function()
+        cancelledPurchase = true
+    end,
+}
+
+-- Simulate delayed ItemKeyInfo arrival via ITEM_KEY_ITEM_INFO_RECEIVED
+Mock.bagCounts[2447] = 0
+PF.DetailWindow.ShowOpportunity(topPlays[1])
+row1Shop.searchBtn:Click()
+Assert(selectedBrowseRow == nil, "Wait for ITEM_KEY_ITEM_INFO_RECEIVED when GetItemKeyInfo is not yet cached")
+itemKeyCache[2447] = { itemID = 2447, itemName = "Peacebloom", isCommodity = true, quality = 1 }
+PF.AHVerifier.frame:Trigger("ITEM_KEY_ITEM_INFO_RECEIVED", 2447)
+Assert(selectedBrowseRow ~= nil and selectedBrowseRow.itemKey.itemID == 2447, "SelectBrowseResult opens item Buy screen once ITEM_KEY_ITEM_INFO_RECEIVED fires")
+
+-- Refresh DetailWindow and verify button now shows "Buy 20x" (5 + 15, ignoring the 50 @ 1g 80s)
+PF.DetailWindow.RefreshIfShown()
+Assert(row1Shop.buyBtn:GetText() == "Buy 20x", "Buy button updates to 'Buy 20x' when commodity search results are loaded")
+
+-- Click 1: Starts commodity purchase for 20 units and updates button to "Confirm (20)"
+row1Shop.buyBtn:Click()
+Assert(startedPurchase ~= nil and startedPurchase.itemId == 2447 and startedPurchase.quantity == 20, "Click 1 calls C_AuctionHouse.StartCommoditiesPurchase(2447, 20)")
+Assert(row1Shop.buyBtn:GetText() == "Confirm (20)", "Button updates to 'Confirm (20)' awaiting hardware click confirmation")
+
+-- Simulate server COMMODITY_PRICE_UPDATED within allowed maxUnitPrice
+PF.AHVerifier.frame:Trigger("COMMODITY_PRICE_UPDATED", 11000, 220000)
+
+-- Click 2: Confirms the commodity purchase
+row1Shop.buyBtn:Click()
+Assert(confirmedPurchase ~= nil and confirmedPurchase.itemId == 2447 and confirmedPurchase.quantity == 20, "Click 2 calls C_AuctionHouse.ConfirmCommoditiesPurchase(2447, 20)")
+
+-- Verify price spike protection cancels purchase if COMMODITY_PRICE_UPDATED exceeds maxUnitPrice
+row1Shop.buyBtn:Click() -- Start another quote
+PF.AHVerifier.frame:Trigger("COMMODITY_PRICE_UPDATED", 19000, 380000) -- Spiked above 11200 max!
+Assert(cancelledPurchase == true and row1Shop.buyBtn:GetText() == "Buy 20x", "Auto-cancel commodity purchase if server price spikes above maxUnitPrice")
 
 print("\nAll Profitable test assertions passed successfully!")
