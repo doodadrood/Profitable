@@ -48,6 +48,11 @@ local defaultConfig = {
         enableVendorArbitrageAlerts = true,      -- Alert when an NPC vendor has limited-stock items profitable on AH
         assumeCanDisenchant = true,              -- Bank alt can always DE
         useIntermediateCrafting = true,          -- Consider smelting ore->bars / cloth->bolts when cheaper than buying bar/bolt
+        useHistoricalSpikeGuard = true,          -- Cap spiked exit prices using SQLite 14-day median when MarketFeed is present
+        maxSpikeMultiplier = 2.0,                -- Flag/cap when live exit price exceeds 2.0x 14-day median
+        spikeCapMultiplier = 1.25,               -- Cap estimated exit revenue to 1.25x 14-day median
+        minHistoricalSamples = 3,                -- Require >= 3 hourly snapshots before enforcing spike cap
+        mirrorFeedToPCF = true,                  -- Softly fill missing/older PCF_DB prices from MarketFeed when both are active
         showSideWindow = true,
     },
     charRecipes = {},     -- [charKey] = { [recipeKey] = recipeTable }

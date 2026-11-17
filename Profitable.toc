@@ -14,6 +14,7 @@ Data/VendorDatabase.lua
 Data/DisenchantDatabase.lua
 Data/RecipeDatabase.lua
 Modules/RecipeScanner.lua
+Modules/MarketFeed.lua
 Modules/OpportunityEngine.lua
 Modules/AHVerifier.lua
 UI/DetailWindow.lua

@@ -2,6 +2,7 @@ package-as: Profitable
 
 ignore:
   - Tests
+  - Tools
   - .agents
   - .antigravity
   - AGENTS.md

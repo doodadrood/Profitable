@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly WoW Forever Auction House Sync for Profitable
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Sync WoW Forever Auction House & SQLite history for Profitable
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/T/Projects/Profitable/Tools/sync_forever_ah.py --region us --ruleset 1 --faction horde

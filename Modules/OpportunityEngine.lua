@@ -40,13 +40,22 @@ function PF.OpportunityEngine.ResolveAHPrice(itemId, itemLink)
         end
     end
 
-    -- 2. Check PCF_DB.prices directly (gives both minBuyout and scanned count)
-    if _G.PCF_DB and type(_G.PCF_DB.prices) == "table" and _G.PCF_DB.prices[itemId] then
-        local entry = _G.PCF_DB.prices[itemId]
-        if entry.minBuyout and entry.minBuyout > 0 then
-            local count = (entry.count and entry.count > 0) and entry.count or 1
-            return entry.minBuyout, count, entry.source or "PCF Scan"
-        end
+    -- 2. Compare PCF_DB.prices and optional Profitable_MarketFeed (prefer whichever is fresher)
+    local pcfEntry = (_G.PCF_DB and type(_G.PCF_DB.prices) == "table") and _G.PCF_DB.prices[itemId] or nil
+    local pcfValid = pcfEntry and pcfEntry.minBuyout and pcfEntry.minBuyout > 0
+    local pcfTs = (pcfValid and pcfEntry.lastUpdated) or 0
+
+    local feedData = (PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh())
+        and PF.MarketFeed.GetItemData(itemId)
+        or nil
+
+    if feedData and (not pcfValid or feedData.timestamp > pcfTs) then
+        return feedData.minBuyout, feedData.totalQuantity, "API Feed"
+    end
+
+    if pcfValid then
+        local count = (pcfEntry.count and pcfEntry.count > 0) and pcfEntry.count or 1
+        return pcfEntry.minBuyout, count, pcfEntry.source or "PCF Scan"
     end
 
     -- 3. Fallback to PCF.ProviderRegistry.ResolveAHPrice (TSM / Auctionator)
@@ -74,6 +83,15 @@ function PF.OpportunityEngine.GetOrderBook(itemId, customOrderBooks)
         local ob = Profitable_DB.orderBookCache[itemId]
         if type(ob.listings) == "table" and #ob.listings > 0 and (time() - (ob.timestamp or 0)) <= 600 then
             rawListings = ob.listings
+        end
+    end
+
+    if not rawListings and PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh() then
+        local feedListings, feedTs = PF.MarketFeed.GetOrderBook(itemId)
+        local pcfEntry = (_G.PCF_DB and type(_G.PCF_DB.prices) == "table") and _G.PCF_DB.prices[itemId] or nil
+        local pcfTs = (pcfEntry and pcfEntry.lastUpdated) or 0
+        if feedListings and feedTs >= pcfTs then
+            rawListings = feedListings
         end
     end
 
@@ -462,6 +480,7 @@ function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCoppe
         roiPercent = roiPercent,
         stoppedReason = stoppedReason,
         shoppingList = shoppingList,
+        spikeInfo = candidate.spikeInfo,
         verified = (candidate.verified == true),
     }
 end
@@ -661,6 +680,7 @@ function PF.OpportunityEngine.CalculateAggregatedBuyDEOpportunity(groupCandidate
         roiPercent = roiPercent,
         stoppedReason = stoppedReason,
         shoppingList = shoppingList,
+        spikeInfo = firstCand.spikeInfo,
         verified = false,
     }
 end
@@ -794,6 +814,16 @@ function PF.OpportunityEngine.BuildDetailedExplanation(opp)
         table.insert(lines, "Expected Disenchant Yield: " .. table.concat(dropParts, " + "))
     end
 
+    if opp.spikeInfo then
+        table.insert(lines, string.format(
+            "Historical Spike Guard: Live AH price (%s) is >2x the 14-day median (%s across %d snapshots); exit value was conservatively capped to %s.",
+            PF.Formatter.FormatMoney(opp.spikeInfo.livePrice),
+            PF.Formatter.FormatMoney(opp.spikeInfo.medianPrice),
+            opp.spikeInfo.observations or 0,
+            PF.Formatter.FormatMoney(opp.spikeInfo.cappedPrice)
+        ))
+    end
+
     return table.concat(lines, "\n\n")
 end
 
@@ -808,61 +838,88 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
     local maxAHGearUnits = settings.maxAHGearUnits or 3
     local deductDeposit = (settings.deductExpectedDeposit ~= false)
 
-    local resolveAHUnit = function(id)
-        local price = PF.OpportunityEngine.ResolveAHPrice(id)
-        return price
+    local resolveExitUnit = function(id)
+        local rawPrice = PF.OpportunityEngine.ResolveAHPrice(id)
+        if not rawPrice then return nil end
+        if PF.MarketFeed and PF.MarketFeed.GetExitPrice then
+            local effective = PF.MarketFeed.GetExitPrice(id, rawPrice)
+            return effective
+        end
+        return rawPrice
+    end
+
+    local FindDESpikeInfo = function(deEval)
+        if not deEval or not deEval.primaryMat or not PF.MarketFeed or not PF.MarketFeed.GetExitPrice then
+            return nil
+        end
+        local matId = deEval.primaryMat.sellItemId or deEval.primaryMat.itemId
+        local rawPrice = PF.OpportunityEngine.ResolveAHPrice(matId)
+        local _, isSpiked, info = PF.MarketFeed.GetExitPrice(matId, rawPrice)
+        return isSpiked and info or nil
     end
 
     local candidates = {}
 
-    -- 1. Scan all items in PCF_DB.prices for direct VENDOR and BUY_DE plays
+    -- 1. Scan all known AH items (PCF_DB + optional MarketFeed) for direct VENDOR and BUY_DE plays
+    local candidateItemIds = {}
     if _G.PCF_DB and type(_G.PCF_DB.prices) == "table" then
         for itemId, entry in pairs(_G.PCF_DB.prices) do
             if type(itemId) == "number" and itemId > 0 and entry and entry.minBuyout and entry.minBuyout > 0 then
-                local meta = PF.VendorDatabase.GetItemMetadata(itemId)
-                local itemName = (meta and meta.name) or string.format("Item #%d", itemId)
-                local vendorSell = PF.VendorDatabase.GetVendorSellPrice(itemId)
+                candidateItemIds[itemId] = true
+            end
+        end
+    end
+    if PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh() and PF.MarketFeed.CollectAllItemIds then
+        PF.MarketFeed.CollectAllItemIds(candidateItemIds)
+    end
 
-                -- Strategy A: Direct AH Buy -> Vendor
-                if vendorSell and vendorSell > entry.minBuyout then
-                    table.insert(candidates, {
-                        actionType = "VENDOR",
-                        itemId = itemId,
-                        itemName = itemName,
-                        ahCutRate = 0,
-                        unitGrossRevenue = vendorSell,
-                        unitNetRevenue = vendorSell,
-                        unitAHCut = 0,
-                        unitDepositRisk = 0,
-                        maxUnits = maxVendorUnits,
-                        rawReagents = {
-                            { itemId = itemId, name = itemName, count = 1 },
-                        },
-                    })
-                end
+    for itemId in pairs(candidateItemIds) do
+        local minBuyout = PF.OpportunityEngine.ResolveAHPrice(itemId)
+        if minBuyout and minBuyout > 0 then
+            local meta = PF.VendorDatabase.GetItemMetadata(itemId)
+            local itemName = (meta and meta.name) or string.format("Item #%d", itemId)
+            local vendorSell = PF.VendorDatabase.GetVendorSellPrice(itemId)
 
-                -- Strategy B: Direct AH Buy -> Disenchant
-                if PF.DisenchantDatabase.CanDisenchant(itemId) then
-                    local deEval = PF.DisenchantDatabase.EvaluateDisenchant(itemId, nil, resolveAHUnit, ahCut)
-                    if deEval and deEval.netValue > entry.minBuyout then
-                        if not vendorSell or deEval.netValue > vendorSell then
-                            local isShard = deEval.isShardOrCrystal == true
-                            table.insert(candidates, {
-                                actionType = "BUY_DE",
-                                itemId = itemId,
-                                itemName = itemName,
-                                ahCutRate = ahCut,
-                                unitGrossRevenue = deEval.grossValue,
-                                unitNetRevenue = deEval.netValue,
-                                unitAHCut = deEval.ahCut or (deEval.grossValue - deEval.netValue),
-                                unitDepositRisk = 0,
-                                deBreakdown = deEval,
-                                maxUnits = isShard and maxShardDEUnits or maxDEUnits,
-                                rawReagents = {
-                                    { itemId = itemId, name = itemName, count = 1 },
-                                },
-                            })
-                        end
+            -- Strategy A: Direct AH Buy -> Vendor
+            if vendorSell and vendorSell > minBuyout then
+                table.insert(candidates, {
+                    actionType = "VENDOR",
+                    itemId = itemId,
+                    itemName = itemName,
+                    ahCutRate = 0,
+                    unitGrossRevenue = vendorSell,
+                    unitNetRevenue = vendorSell,
+                    unitAHCut = 0,
+                    unitDepositRisk = 0,
+                    maxUnits = maxVendorUnits,
+                    rawReagents = {
+                        { itemId = itemId, name = itemName, count = 1 },
+                    },
+                })
+            end
+
+            -- Strategy B: Direct AH Buy -> Disenchant
+            if PF.DisenchantDatabase.CanDisenchant(itemId) then
+                local deEval = PF.DisenchantDatabase.EvaluateDisenchant(itemId, nil, resolveExitUnit, ahCut)
+                if deEval and deEval.netValue > minBuyout then
+                    if not vendorSell or deEval.netValue > vendorSell then
+                        local isShard = deEval.isShardOrCrystal == true
+                        table.insert(candidates, {
+                            actionType = "BUY_DE",
+                            itemId = itemId,
+                            itemName = itemName,
+                            ahCutRate = ahCut,
+                            unitGrossRevenue = deEval.grossValue,
+                            unitNetRevenue = deEval.netValue,
+                            unitAHCut = deEval.ahCut or (deEval.grossValue - deEval.netValue),
+                            unitDepositRisk = 0,
+                            deBreakdown = deEval,
+                            spikeInfo = FindDESpikeInfo(deEval),
+                            maxUnits = isShard and maxShardDEUnits or maxDEUnits,
+                            rawReagents = {
+                                { itemId = itemId, name = itemName, count = 1 },
+                            },
+                        })
                     end
                 end
             end
@@ -883,8 +940,12 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
             local vendorSell = PF.VendorDatabase.GetVendorSellPrice(outId, recipe.outputLink)
             local craftVendorRev = vendorSell and math.floor(vendorSell * avgMade) or 0
 
-            -- Strategy D: Craft and AH
-            local ahUnitPrice = PF.OpportunityEngine.ResolveAHPrice(outId, recipe.outputLink)
+            -- Strategy D: Craft and AH (with historical spike guard when MarketFeed is present)
+            local rawAHUnitPrice = PF.OpportunityEngine.ResolveAHPrice(outId, recipe.outputLink)
+            local ahUnitPrice, ahSpiked, ahSpikeInfo = rawAHUnitPrice, false, nil
+            if rawAHUnitPrice and PF.MarketFeed and PF.MarketFeed.GetExitPrice then
+                ahUnitPrice, ahSpiked, ahSpikeInfo = PF.MarketFeed.GetExitPrice(outId, rawAHUnitPrice)
+            end
             local craftAHGross = ahUnitPrice and math.floor(ahUnitPrice * avgMade) or 0
             local craftAHCut = ahUnitPrice and math.ceil(craftAHGross * ahCut) or 0
             local craftDepositRisk = (isEquippableGear and deductDeposit and craftVendorRev > 0)
@@ -898,7 +959,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
             local craftDENet = 0
             local craftDECut = 0
             if PF.DisenchantDatabase.CanDisenchant(outId, recipe.outputLink) then
-                deEval = PF.DisenchantDatabase.EvaluateDisenchant(outId, recipe.outputLink, resolveAHUnit, ahCut)
+                deEval = PF.DisenchantDatabase.EvaluateDisenchant(outId, recipe.outputLink, resolveExitUnit, ahCut)
                 if deEval then
                     craftDEGross = math.floor(deEval.grossValue * avgMade)
                     craftDENet = math.floor(deEval.netValue * avgMade)
@@ -937,6 +998,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                     unitNetRevenue = craftAHNet,
                     unitAHCut = craftAHCut,
                     unitDepositRisk = craftDepositRisk,
+                    spikeInfo = ahSpiked and ahSpikeInfo or nil,
                     maxUnits = isEquippableGear and maxAHGearUnits or maxAHCraftUnits,
                     rawReagents = recipe.reagents,
                 })
@@ -957,6 +1019,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                     unitNetRevenue = craftDENet,
                     unitAHCut = craftDECut,
                     unitDepositRisk = 0,
+                    spikeInfo = FindDESpikeInfo(deEval),
                     maxUnits = isShard and maxShardDEUnits or maxDEUnits,
                     rawReagents = recipe.reagents,
                 })

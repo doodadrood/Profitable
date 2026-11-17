@@ -209,12 +209,13 @@ local function PopulateRowButton(btn, opp, rankOrPrefix)
         line1 = PF.OpportunityEngine.FormatOpportunityLine(nil, opp, rankOrPrefix)
     end
     local verTag = opp.verified and "|cff00ff00[Verified]|r" or "|cffffcc00[Cached]|r"
+    local spikeTag = opp.spikeInfo and " |cffff6600[Spike Cap]|r" or ""
     local recTag = (opp.recipe and opp.recipe.isTrainerRecommendation)
         and string.format(" |cff00ccff[%s]|r", opp.recipe.sourceHint or "Trainer")
         or ""
     local line2 = string.format(
-        "   Qty: %dx  |  ROI: %d%%  |  %s%s  —  |cff88ccffClick to expand|r",
-        opp.quantity or 1, opp.roiPercent or 0, verTag, recTag
+        "   Qty: %dx  |  ROI: %d%%  |  %s%s%s  —  |cff88ccffClick to expand|r",
+        opp.quantity or 1, opp.roiPercent or 0, verTag, spikeTag, recTag
     )
     if btn.mainText then btn.mainText:SetText(line1) end
     if btn.subText then btn.subText:SetText(line2) end
@@ -247,9 +248,16 @@ function PF.SideWindow.RefreshRows()
     end
 
     if sideFrame.infoText then
+        local feedAgeSec = PF.MarketFeed and PF.MarketFeed.GetFeedAgeSeconds and PF.MarketFeed.GetFeedAgeSeconds()
+        local feedNote = ""
+        if type(feedAgeSec) == "number" then
+            local mins = math.floor(feedAgeSec / 60)
+            local ageLabel = (mins >= 60) and string.format("%dh", math.floor(mins / 60)) or string.format("%dm", mins)
+            feedNote = string.format("  |  |cff00ff88Feed: %s|r", ageLabel)
+        end
         sideFrame.infoText:SetText(string.format(
-            "Budget: |cffffd100%s|r  |  Recipes: |cff00ff88%d|r  |  PCF Items: |cff00ccff%d|r",
-            PF.Formatter.FormatMoney(gold), #recipes, pcfItems
+            "Budget: |cffffd100%s|r  |  Recipes: |cff00ff88%d|r  |  Items: |cff00ccff%d|r%s",
+            PF.Formatter.FormatMoney(gold), #recipes, pcfItems, feedNote
         ))
     end
 

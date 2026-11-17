@@ -89,6 +89,9 @@ function PF.Initialize()
     if PF.RecipeScanner and PF.RecipeScanner.Init then
         PF.RecipeScanner.Init()
     end
+    if PF.MarketFeed and PF.MarketFeed.OnFeedLoaded then
+        PF.MarketFeed.OnFeedLoaded()
+    end
     if PF.AHVerifier and PF.AHVerifier.Init then
         PF.AHVerifier.Init()
     end

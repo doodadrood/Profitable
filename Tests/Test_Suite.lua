@@ -14,6 +14,7 @@ require("Data.VendorDatabase")
 require("Data.DisenchantDatabase")
 require("Data.RecipeDatabase")
 require("Modules.RecipeScanner")
+require("Modules.MarketFeed")
 require("Modules.OpportunityEngine")
 require("Modules.AHVerifier")
 require("UI.DetailWindow")
@@ -495,5 +496,37 @@ sf.scripts["OnMouseWheel"](sf, -1)
 Assert(sf._currentScroll > 0, "Mouse wheel down scrolls DetailWindow content")
 sf.scripts["OnMouseWheel"](sf, 1)
 Assert(sf._currentScroll == 0, "Mouse wheel up scrolls DetailWindow back to top")
+
+-- 16. Test Ancillary MarketFeed Stepped Order Books, Non-Destructive PCF Mirror & 14-Day Historical Spike Guard
+_G.PCF_DB.prices[11084] = { minBuyout = 80000, count = 10, lastUpdated = Mock.currentTime } -- Fresh in-game scan (8g)
+_G.Profitable_MarketFeed = {
+    timestamp = math.floor(Mock.currentTime) - 300, -- 5 min old offline feed
+    region = "us",
+    rulesetId = 1,
+    houseId = 6,
+    houseName = "Horde Auction House",
+    items = {
+        -- Large Glimmering Shard (11084): 14d median is 1g 50s across 12 observations, live is spiked to 8g!
+        [11084] = { m = 75000, q = 12, med = 15000, obs = 12, tiers = { { 75000, 5 }, { 80000, 7 } } },
+        -- Item only present in API Feed (not yet scanned in PCF_DB)
+        [774] = { m = 150, q = 25, med = 140, obs = 10, tiers = { { 150, 10 }, { 200, 15 } } },
+    },
+}
+
+local mirroredCount = PF.MarketFeed.MirrorToPCF()
+Assert(mirroredCount == 1, "MirrorToPCF fills missing items (774) without overwriting fresher in-game PCF scan (11084)")
+Assert(_G.PCF_DB.prices[11084].minBuyout == 80000, "Fresher in-game PCF_DB scan takes precedence over older API feed")
+Assert(_G.PCF_DB.prices[774].minBuyout == 150 and _G.PCF_DB.prices[774].source == "API Feed", "API Feed populates missing item in PCF_DB when both Profitable and MarketFeed are active")
+
+-- Verify 14-day historical spike guard caps spiked exit price (8g -> 1.25 * 1g50s = 1g87s50c)
+local cappedExit, wasSpiked, spikeDetails = PF.MarketFeed.GetExitPrice(11084, 80000)
+Assert(wasSpiked == true and cappedExit == 18750 and spikeDetails.medianPrice == 15000, "Spike guard caps >2x spiked exit price (8g) down to 1.25x 14d median (1g 87s 50c)")
+
+-- Verify MarketFeed stepped order book works automatically in OpportunityEngine.GetOrderBook
+local feedBook = PF.OpportunityEngine.GetOrderBook(774)
+Assert(#feedBook == 2 and feedBook[1].unitPrice == 150 and feedBook[2].quantity == 15, "OpportunityEngine reads stepped order-book tiers from MarketFeed")
+
+-- Clean up Profitable_MarketFeed for clean exit
+_G.Profitable_MarketFeed = nil
 
 print("\nAll Profitable test assertions passed successfully!")
