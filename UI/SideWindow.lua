@@ -35,16 +35,18 @@ local function CreateOpportunityButton(parent, frameName, yOffset, bgR, bgG, bgB
 
     local mainText = btn.CreateFontString and btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     if mainText then
-        if mainText.SetPoint then mainText.SetPoint(mainText, "TOPLEFT", btn, "TOPLEFT", 8, -6) end
+        if mainText.SetPoint then mainText:SetPoint("TOPLEFT", btn, "TOPLEFT", 8, -6) end
         if mainText.SetWidth then mainText:SetWidth(320) end
         if mainText.SetJustifyH then mainText:SetJustifyH("LEFT") end
+        if mainText.SetWordWrap then pcall(mainText.SetWordWrap, mainText, false) end
     end
 
     local subText = btn.CreateFontString and btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     if subText then
-        if subText.SetPoint then subText:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 8, 5) end
+        if subText.SetPoint then subText:SetPoint("TOPLEFT", mainText, "BOTTOMLEFT", 0, -4) end
         if subText.SetWidth then subText:SetWidth(320) end
         if subText.SetJustifyH then subText:SetJustifyH("LEFT") end
+        if subText.SetWordWrap then pcall(subText.SetWordWrap, subText, false) end
     end
 
     btn:SetScript("OnClick", function()

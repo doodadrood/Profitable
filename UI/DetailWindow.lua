@@ -129,7 +129,7 @@ local function UpdateScrollRange()
         end
     end
 
-    local totalContentHeight = descHeight + 38 + (visibleRows * 46) + 12
+    local totalContentHeight = descHeight + 38 + (visibleRows * 60) + 12
     if detailFrame.scrollChild.SetHeight then
         detailFrame.scrollChild:SetHeight(math.max(SCROLL_VIEWPORT_HEIGHT, totalContentHeight))
     end
@@ -153,7 +153,7 @@ end
 
 local function CreateShoppingRow(parent, index, anchorBelowFrame)
     local row = CreateFrame("Frame", "PF_DetailShoppingRow" .. index, parent)
-    if row.SetSize then row:SetSize(432, 40) end
+    if row.SetSize then row:SetSize(432, 54) end
     if row.SetPoint then
         if index == 1 then
             row:SetPoint("TOPLEFT", anchorBelowFrame, "BOTTOMLEFT", 0, -8)
@@ -164,24 +164,36 @@ local function CreateShoppingRow(parent, index, anchorBelowFrame)
     SetBackdropSafe(row, 0.12, 0.13, 0.16, 0.90)
     BindMouseWheelForwarding(row)
 
-    -- Clickable Item Link Button
+    -- Line 1: Clickable Item Link Button
     local itemBtn = CreateFrame("Button", "PF_DetailShoppingItemBtn" .. index, row)
-    if itemBtn.SetSize then itemBtn:SetSize(268, 18) end
-    if itemBtn.SetPoint then itemBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 8, -4) end
+    if itemBtn.SetSize then itemBtn:SetSize(268, 16) end
+    if itemBtn.SetPoint then itemBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 8, -5) end
     BindMouseWheelForwarding(itemBtn)
 
     local itemText = itemBtn.CreateFontString and itemBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     if itemText then
         if itemText.SetPoint then itemText:SetPoint("LEFT", itemBtn, "LEFT", 0, 0) end
-        if itemText.SetWidth then itemText:SetWidth(266) end
+        if itemText.SetWidth then itemText:SetWidth(268) end
         if itemText.SetJustifyH then itemText:SetJustifyH("LEFT") end
+        if itemText.SetWordWrap then pcall(itemText.SetWordWrap, itemText, false) end
     end
 
+    -- Line 2: Live Inventory / Mailbox Status (anchored below itemBtn so it never overlaps Line 1)
     local statusText = row.CreateFontString and row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     if statusText then
-        if statusText.SetPoint then statusText:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 8, 5) end
+        if statusText.SetPoint then statusText:SetPoint("TOPLEFT", itemBtn, "BOTTOMLEFT", 0, -3) end
         if statusText.SetWidth then statusText:SetWidth(268) end
         if statusText.SetJustifyH then statusText:SetJustifyH("LEFT") end
+        if statusText.SetWordWrap then pcall(statusText.SetWordWrap, statusText, false) end
+    end
+
+    -- Line 3: Unit & Total Price Info (anchored below statusText so it never wraps into Line 1 or Line 2)
+    local priceText = row.CreateFontString and row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    if priceText then
+        if priceText.SetPoint then priceText:SetPoint("TOPLEFT", statusText, "BOTTOMLEFT", 0, -2) end
+        if priceText.SetWidth then priceText:SetWidth(268) end
+        if priceText.SetJustifyH then priceText:SetJustifyH("LEFT") end
+        if priceText.SetWordWrap then pcall(priceText.SetWordWrap, priceText, false) end
     end
 
     local searchBtn = CreateFrame("Button", "PF_DetailShoppingSearchBtn" .. index, row, "UIPanelButtonTemplate")
@@ -228,6 +240,7 @@ local function CreateShoppingRow(parent, index, anchorBelowFrame)
     row.itemBtn = itemBtn
     row.itemText = itemText
     row.statusText = statusText
+    row.priceText = priceText
     row.searchBtn = searchBtn
     row.buyBtn = buyBtn
     return row
@@ -500,15 +513,18 @@ function PF.DetailWindow.RefreshIfShown()
 
             local priceInfo
             if item.source == "Vendor" then
-                priceInfo = string.format("Vendor: %s ea (%s)", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
+                priceInfo = string.format("|cffccccccVendor: %s ea (Total: %s)|r", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
             elseif item.minUnitPrice ~= item.maxUnitPrice then
-                priceInfo = string.format("Avg %s (Max %s) | %s", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.maxUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
+                priceInfo = string.format("|cffccccccAvg %s (Max %s) | Total: %s|r", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.maxUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
             else
-                priceInfo = string.format("AH: %s ea (%s)", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
+                priceInfo = string.format("|cffccccccAH: %s ea (Total: %s)|r", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
             end
 
             if row.statusText then
-                row.statusText:SetText(invStatus .. "  |  " .. priceInfo)
+                row.statusText:SetText(invStatus)
+            end
+            if row.priceText then
+                row.priceText:SetText(priceInfo)
             end
 
             if row.searchBtn then
