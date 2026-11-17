@@ -112,12 +112,26 @@ _G.CreateFrame = function(frameType, name, parent, template)
     function frame:IsShown() return self.shown end
     function frame:IsVisible() return self.shown end
     function frame:SetMinMaxValues(minV, maxV) self.minVal = minV; self.maxVal = maxV end
-    function frame:SetValue(v) self.val = v end
+    function frame:SetValue(v)
+        self.val = v
+        if self.scripts["OnValueChanged"] then
+            self.scripts["OnValueChanged"](self, v)
+        end
+    end
     function frame:GetValue() return self.val end
     function frame:SetStatusBarTexture(...) end
     function frame:SetStatusBarColor(...) end
+    function frame:SetScrollChild(child) self.scrollChild = child end
+    function frame:SetVerticalScroll(offset) self.vScroll = offset end
+    function frame:GetVerticalScroll() return self.vScroll or 0 end
+    function frame:EnableMouseWheel(...) end
+    function frame:SetClipsChildren(...) end
+    function frame:SetOrientation(...) end
+    function frame:SetValueStep(...) end
+    function frame:SetThumbTexture(...) end
     function frame:CreateTexture(...)
         return {
+            SetSize = function() end,
             SetAllPoints = function() end,
             SetColorTexture = function() end,
             SetTexture = function() end,
@@ -131,6 +145,7 @@ _G.CreateFrame = function(frameType, name, parent, template)
         function fs:SetJustifyV(...) end
         function fs:SetText(t) self.text = t end
         function fs:GetText() return self.text end
+        function fs:GetStringHeight() return 0 end
         function fs:Show() self.shown = true end
         function fs:Hide() self.shown = false end
         return fs

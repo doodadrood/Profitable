@@ -7,7 +7,9 @@ PF.DetailWindow = {}
 local detailFrame = nil
 local currentOpportunity = nil
 local shoppingRows = {}
-local MAX_SHOPPING_ROWS = 8
+local MAX_SHOPPING_ROWS = 12
+local SCROLL_VIEWPORT_HEIGHT = 360
+local SCROLL_STEP = 38
 
 local function SetBackdropSafe(frame, bgR, bgG, bgB, bgA)
     if not frame then return end
@@ -57,45 +59,142 @@ local function ShowItemTooltip(owner, itemId, itemLink)
         pcall(_G.GameTooltip.SetHyperlink, _G.GameTooltip, "item:" .. tostring(itemId))
     end
     _G.GameTooltip:AddLine(" ")
-    _G.GameTooltip:AddLine("|cff00ff88Click:|r Search on AH / View Item", 0.8, 0.8, 0.8)
+    _G.GameTooltip:AddLine("|cff00ff88Click:|r Open in AH / View Item", 0.8, 0.8, 0.8)
     _G.GameTooltip:AddLine("|cff00ff88Shift-Click:|r Insert into AH Search / Chat", 0.8, 0.8, 0.8)
     _G.GameTooltip:Show()
 end
 
-local function CreateShoppingRow(parent, index)
+local function ApplyScrollOffset(offset)
+    if not detailFrame or not detailFrame.scrollFrame then return end
+    local sf = detailFrame.scrollFrame
+    local maxScroll = sf._maxScroll or 0
+    local clamped = math.max(0, math.min(maxScroll, offset or 0))
+    sf._currentScroll = clamped
+    if sf.SetVerticalScroll then
+        pcall(sf.SetVerticalScroll, sf, clamped)
+    end
+    if detailFrame.scrollBar and detailFrame.scrollBar.SetValue then
+        detailFrame._updatingScrollBar = true
+        pcall(detailFrame.scrollBar.SetValue, detailFrame.scrollBar, clamped)
+        detailFrame._updatingScrollBar = false
+    end
+end
+
+local function OnDetailMouseWheel(_, delta)
+    if not detailFrame or not detailFrame.scrollFrame then return end
+    local sf = detailFrame.scrollFrame
+    local cur = sf._currentScroll or (sf.GetVerticalScroll and sf:GetVerticalScroll()) or 0
+    local nextOffset = cur - ((delta or 0) * SCROLL_STEP)
+    ApplyScrollOffset(nextOffset)
+end
+
+local function BindMouseWheelForwarding(frame)
+    if not frame then return end
+    if frame.EnableMouseWheel then
+        pcall(frame.EnableMouseWheel, frame, true)
+    end
+    if frame.SetScript then
+        pcall(frame.SetScript, frame, "OnMouseWheel", OnDetailMouseWheel)
+    end
+end
+
+local function EstimateWrappedTextHeight(text, charsPerLine, lineHeight)
+    if type(text) ~= "string" or text == "" then return 20 end
+    charsPerLine = charsPerLine or 68
+    lineHeight = lineHeight or 14
+    local totalLines = 0
+    for paragraph in (text .. "\n"):gmatch("(.-)\n") do
+        local stripped = paragraph:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|H.-|h", ""):gsub("|h", "")
+        local len = math.max(1, #stripped)
+        totalLines = totalLines + math.max(1, math.ceil(len / charsPerLine))
+    end
+    return totalLines * lineHeight
+end
+
+local function UpdateScrollRange()
+    if not detailFrame or not detailFrame.scrollFrame or not detailFrame.scrollChild then
+        return
+    end
+
+    local descText = detailFrame.descText
+    local rawText = (descText and descText.GetText and descText:GetText()) or ""
+    local measuredHeight = (descText and descText.GetStringHeight and descText:GetStringHeight()) or 0
+    local estimatedHeight = EstimateWrappedTextHeight(rawText, 66, 14)
+    local descHeight = math.max(measuredHeight, estimatedHeight, 24)
+
+    local visibleRows = 0
+    for i = 1, MAX_SHOPPING_ROWS do
+        if shoppingRows[i] and shoppingRows[i]._itemData then
+            visibleRows = visibleRows + 1
+        end
+    end
+
+    local totalContentHeight = descHeight + 38 + (visibleRows * 46) + 12
+    if detailFrame.scrollChild.SetHeight then
+        detailFrame.scrollChild:SetHeight(math.max(SCROLL_VIEWPORT_HEIGHT, totalContentHeight))
+    end
+
+    local maxScroll = math.max(0, totalContentHeight - SCROLL_VIEWPORT_HEIGHT)
+    detailFrame.scrollFrame._maxScroll = maxScroll
+
+    if detailFrame.scrollBar then
+        if detailFrame.scrollBar.SetMinMaxValues then
+            detailFrame.scrollBar:SetMinMaxValues(0, maxScroll)
+        end
+        if maxScroll > 0 then
+            if detailFrame.scrollBar.Show then detailFrame.scrollBar:Show() end
+        else
+            if detailFrame.scrollBar.Hide then detailFrame.scrollBar:Hide() end
+        end
+    end
+
+    ApplyScrollOffset(math.min(detailFrame.scrollFrame._currentScroll or 0, maxScroll))
+end
+
+local function CreateShoppingRow(parent, index, anchorBelowFrame)
     local row = CreateFrame("Frame", "PF_DetailShoppingRow" .. index, parent)
-    if row.SetSize then row:SetSize(416, 36) end
+    if row.SetSize then row:SetSize(432, 40) end
     if row.SetPoint then
-        row:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -230 - ((index - 1) * 40))
+        if index == 1 then
+            row:SetPoint("TOPLEFT", anchorBelowFrame, "BOTTOMLEFT", 0, -8)
+        else
+            row:SetPoint("TOPLEFT", anchorBelowFrame, "BOTTOMLEFT", 0, -6)
+        end
     end
     SetBackdropSafe(row, 0.12, 0.13, 0.16, 0.90)
+    BindMouseWheelForwarding(row)
 
     -- Clickable Item Link Button
     local itemBtn = CreateFrame("Button", "PF_DetailShoppingItemBtn" .. index, row)
-    if itemBtn.SetSize then itemBtn:SetSize(220, 18) end
-    if itemBtn.SetPoint then itemBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 6, -3) end
+    if itemBtn.SetSize then itemBtn:SetSize(268, 18) end
+    if itemBtn.SetPoint then itemBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 8, -4) end
+    BindMouseWheelForwarding(itemBtn)
 
     local itemText = itemBtn.CreateFontString and itemBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     if itemText then
         if itemText.SetPoint then itemText:SetPoint("LEFT", itemBtn, "LEFT", 0, 0) end
+        if itemText.SetWidth then itemText:SetWidth(266) end
         if itemText.SetJustifyH then itemText:SetJustifyH("LEFT") end
     end
 
     local statusText = row.CreateFontString and row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     if statusText then
-        if statusText.SetPoint then statusText:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 6, 4) end
+        if statusText.SetPoint then statusText:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 8, 5) end
+        if statusText.SetWidth then statusText:SetWidth(268) end
         if statusText.SetJustifyH then statusText:SetJustifyH("LEFT") end
     end
 
     local searchBtn = CreateFrame("Button", "PF_DetailShoppingSearchBtn" .. index, row, "UIPanelButtonTemplate")
     if searchBtn.SetSize then searchBtn:SetSize(74, 22) end
     if searchBtn.SetPoint then searchBtn:SetPoint("RIGHT", row, "RIGHT", -80, 0) end
-    if searchBtn.SetText then searchBtn:SetText("Search AH") end
+    if searchBtn.SetText then searchBtn:SetText("Open in AH") end
+    BindMouseWheelForwarding(searchBtn)
 
     local buyBtn = CreateFrame("Button", "PF_DetailShoppingBuyBtn" .. index, row, "UIPanelButtonTemplate")
     if buyBtn.SetSize then buyBtn:SetSize(70, 22) end
     if buyBtn.SetPoint then buyBtn:SetPoint("RIGHT", row, "RIGHT", -6, 0) end
     if buyBtn.SetText then buyBtn:SetText("Buy Next") end
+    BindMouseWheelForwarding(buyBtn)
 
     itemBtn:SetScript("OnClick", function()
         if row._itemData then
@@ -138,7 +237,7 @@ local function EnsureDetailFrame()
     if detailFrame then return detailFrame end
 
     detailFrame = CreateFrame("Frame", "PF_OpportunityDetailWindow", _G.UIParent)
-    if detailFrame.SetSize then detailFrame:SetSize(440, 520) end
+    if detailFrame.SetSize then detailFrame:SetSize(480, 520) end
     if detailFrame.SetPoint then detailFrame:SetPoint("CENTER", _G.UIParent, "CENTER", 220, 0) end
     if detailFrame.SetFrameStrata then detailFrame:SetFrameStrata("DIALOG") end
     if detailFrame.SetMovable then detailFrame:SetMovable(true) end
@@ -150,6 +249,7 @@ local function EnsureDetailFrame()
     detailFrame:SetScript("OnDragStop", function(self)
         if self.StopMovingOrSizing then self:StopMovingOrSizing() end
     end)
+    BindMouseWheelForwarding(detailFrame)
 
     SetBackdropSafe(detailFrame, 0.05, 0.06, 0.08, 0.96)
 
@@ -168,8 +268,8 @@ local function EnsureDetailFrame()
 
     -- Target Item Clickable Title Button
     local titleBtn = CreateFrame("Button", "PF_DetailTargetItemButton", detailFrame)
-    if titleBtn.SetSize then titleBtn:SetSize(410, 24) end
-    if titleBtn.SetPoint then titleBtn:SetPoint("TOPLEFT", detailFrame, "TOPLEFT", 14, -38) end
+    if titleBtn.SetSize then titleBtn:SetSize(446, 24) end
+    if titleBtn.SetPoint then titleBtn:SetPoint("TOPLEFT", detailFrame, "TOPLEFT", 14, -36) end
 
     local titleText = titleBtn.CreateFontString and titleBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
     if titleText then
@@ -189,39 +289,83 @@ local function EnsureDetailFrame()
         if _G.GameTooltip then _G.GameTooltip:Hide() end
     end)
 
-    -- Financial Breakdown Summary Box
+    -- Financial Breakdown Summary Box (Pinned at Top)
     local metricsText = detailFrame.CreateFontString and detailFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     if metricsText then
-        if metricsText.SetPoint then metricsText:SetPoint("TOPLEFT", detailFrame, "TOPLEFT", 14, -68) end
-        if metricsText.SetWidth then metricsText:SetWidth(412) end
+        if metricsText.SetPoint then metricsText:SetPoint("TOPLEFT", detailFrame, "TOPLEFT", 14, -64) end
+        if metricsText.SetWidth then metricsText:SetWidth(450) end
         if metricsText.SetJustifyH then metricsText:SetJustifyH("LEFT") end
     end
 
-    -- Explanation / Why It's Valuable Box
-    local descText = detailFrame.CreateFontString and detailFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    -- Scrollable Body Viewport (holds explanation text + shopping list header + shopping rows)
+    local scrollFrame = CreateFrame("ScrollFrame", "PF_DetailScrollFrame", detailFrame)
+    if scrollFrame.SetSize then scrollFrame:SetSize(440, SCROLL_VIEWPORT_HEIGHT) end
+    if scrollFrame.SetPoint then scrollFrame:SetPoint("TOPLEFT", detailFrame, "TOPLEFT", 14, -106) end
+    if scrollFrame.SetClipsChildren then pcall(scrollFrame.SetClipsChildren, scrollFrame, true) end
+    scrollFrame._currentScroll = 0
+    scrollFrame._maxScroll = 0
+    BindMouseWheelForwarding(scrollFrame)
+
+    local scrollChild = CreateFrame("Frame", "PF_DetailScrollChild", scrollFrame)
+    if scrollChild.SetSize then scrollChild:SetSize(436, SCROLL_VIEWPORT_HEIGHT) end
+    if scrollFrame.SetScrollChild then
+        pcall(scrollFrame.SetScrollChild, scrollFrame, scrollChild)
+    end
+    BindMouseWheelForwarding(scrollChild)
+
+    -- Thin Vertical Scrollbar Slider on Right Edge
+    local scrollBar = CreateFrame("Slider", "PF_DetailScrollBar", detailFrame)
+    if scrollBar.SetSize then scrollBar:SetSize(10, SCROLL_VIEWPORT_HEIGHT) end
+    if scrollBar.SetPoint then scrollBar:SetPoint("TOPLEFT", scrollFrame, "TOPRIGHT", 6, 0) end
+    if scrollBar.SetOrientation then pcall(scrollBar.SetOrientation, scrollBar, "VERTICAL") end
+    if scrollBar.SetMinMaxValues then scrollBar:SetMinMaxValues(0, 0) end
+    if scrollBar.SetValueStep then pcall(scrollBar.SetValueStep, scrollBar, 10) end
+    if scrollBar.SetValue then scrollBar:SetValue(0) end
+    SetBackdropSafe(scrollBar, 0.14, 0.16, 0.20, 0.90)
+    if scrollBar.CreateTexture and scrollBar.SetThumbTexture then
+        local thumb = scrollBar:CreateTexture(nil, "OVERLAY")
+        if thumb.SetSize then thumb:SetSize(10, 44) end
+        if thumb.SetColorTexture then
+            thumb:SetColorTexture(0.20, 0.85, 0.55, 0.90)
+        elseif thumb.SetTexture then
+            thumb:SetTexture(0.20, 0.85, 0.55, 0.90)
+        end
+        pcall(scrollBar.SetThumbTexture, scrollBar, thumb)
+    end
+    scrollBar:SetScript("OnValueChanged", function(_, value)
+        if detailFrame._updatingScrollBar then return end
+        ApplyScrollOffset(value)
+    end)
+    BindMouseWheelForwarding(scrollBar)
+
+    -- Explanation / Why It's Valuable Box (Top of ScrollChild)
+    local descText = scrollChild.CreateFontString and scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     if descText then
-        if descText.SetPoint then descText:SetPoint("TOPLEFT", detailFrame, "TOPLEFT", 14, -112) end
-        if descText.SetWidth then descText:SetWidth(412) end
+        if descText.SetPoint then descText:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 2, -4) end
+        if descText.SetWidth then descText:SetWidth(430) end
         if descText.SetJustifyH then descText:SetJustifyH("LEFT") end
         if descText.SetJustifyV then descText:SetJustifyV("TOP") end
     end
 
-    -- Shopping List Section Header
-    local shopHeader = detailFrame.CreateFontString and detailFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    -- Shopping List Section Header (Dynamically anchored below descText so it can NEVER overlap!)
+    local shopHeader = scrollChild.CreateFontString and scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     if shopHeader then
-        if shopHeader.SetPoint then shopHeader:SetPoint("TOPLEFT", detailFrame, "TOPLEFT", 14, -210) end
+        if shopHeader.SetPoint then
+            shopHeader:SetPoint("TOPLEFT", descText, "BOTTOMLEFT", 0, -14)
+        end
         if shopHeader.SetText then
             shopHeader:SetText("|cffffd100Shopping List & Live Inventory / Mailbox Tracker:|r")
         end
     end
 
     for i = 1, MAX_SHOPPING_ROWS do
-        shoppingRows[i] = CreateShoppingRow(detailFrame, i)
+        local anchorTarget = (i == 1) and shopHeader or shoppingRows[i - 1]
+        shoppingRows[i] = CreateShoppingRow(scrollChild, i, anchorTarget)
     end
 
-    -- Footer Action Buttons
+    -- Footer Action Buttons (Pinned at Bottom of Window)
     local recipeBtn = CreateFrame("Button", "PF_DetailOpenRecipeButton", detailFrame, "UIPanelButtonTemplate")
-    if recipeBtn.SetSize then recipeBtn:SetSize(140, 24) end
+    if recipeBtn.SetSize then recipeBtn:SetSize(145, 24) end
     if recipeBtn.SetPoint then recipeBtn:SetPoint("BOTTOMLEFT", detailFrame, "BOTTOMLEFT", 14, 14) end
     if recipeBtn.SetText then recipeBtn:SetText("Open Recipe") end
     recipeBtn:SetScript("OnClick", function()
@@ -231,8 +375,8 @@ local function EnsureDetailFrame()
     end)
 
     local searchTargetBtn = CreateFrame("Button", "PF_DetailSearchTargetButton", detailFrame, "UIPanelButtonTemplate")
-    if searchTargetBtn.SetSize then searchTargetBtn:SetSize(130, 24) end
-    if searchTargetBtn.SetPoint then searchTargetBtn:SetPoint("BOTTOM", detailFrame, "BOTTOM", 8, 14) end
+    if searchTargetBtn.SetSize then searchTargetBtn:SetSize(140, 24) end
+    if searchTargetBtn.SetPoint then searchTargetBtn:SetPoint("BOTTOM", detailFrame, "BOTTOM", 10, 14) end
     if searchTargetBtn.SetText then searchTargetBtn:SetText("Search Target AH") end
     searchTargetBtn:SetScript("OnClick", function()
         if currentOpportunity then
@@ -241,14 +385,13 @@ local function EnsureDetailFrame()
     end)
 
     local refreshBtn = CreateFrame("Button", "PF_DetailRefreshButton", detailFrame, "UIPanelButtonTemplate")
-    if refreshBtn.SetSize then refreshBtn:SetSize(110, 24) end
+    if refreshBtn.SetSize then refreshBtn:SetSize(120, 24) end
     if refreshBtn.SetPoint then refreshBtn:SetPoint("BOTTOMRIGHT", detailFrame, "BOTTOMRIGHT", -14, 14) end
     if refreshBtn.SetText then refreshBtn:SetText("Refresh Bags") end
     refreshBtn:SetScript("OnClick", function()
         PF.DetailWindow.RefreshIfShown()
     end)
 
-    -- Live Inventory / Mailbox Event Listener so players see bag counts update as they loot mail
     if detailFrame.RegisterEvent then
         pcall(detailFrame.RegisterEvent, detailFrame, "BAG_UPDATE")
         pcall(detailFrame.RegisterEvent, detailFrame, "BAG_UPDATE_DELAYED")
@@ -261,7 +404,11 @@ local function EnsureDetailFrame()
 
     detailFrame.titleText = titleText
     detailFrame.metricsText = metricsText
+    detailFrame.scrollFrame = scrollFrame
+    detailFrame.scrollChild = scrollChild
+    detailFrame.scrollBar = scrollBar
     detailFrame.descText = descText
+    detailFrame.shopHeader = shopHeader
     detailFrame.recipeBtn = recipeBtn
     detailFrame.searchTargetBtn = searchTargetBtn
     detailFrame.refreshBtn = refreshBtn
@@ -281,9 +428,8 @@ function PF.DetailWindow.ShowOpportunity(opp)
 
     local frame = EnsureDetailFrame()
     frame:Show()
+    ApplyScrollOffset(0)
 
-    -- Automatically open the first required AH item in the Default Blizzard AuctionHouseFrame
-    -- so its Buy screen and listings are immediately ready!
     if PF.AHVerifier and PF.AHVerifier.OpenNextNeededItemInDefaultAH then
         PF.AHVerifier.OpenNextNeededItemInDefaultAH(opp)
     end
@@ -311,7 +457,7 @@ function PF.DetailWindow.RefreshIfShown()
             and string.format("%s (%d%%)", PF.Formatter.FormatMoney(opp.totalAHCut), cutPct)
             or "0c (Vendor)"
         local depStr = (opp.totalDepositRisk and opp.totalDepositRisk > 0)
-            and string.format("  |cffffd100Est. Deposit:|r %s", PF.Formatter.FormatMoney(opp.totalDepositRisk))
+            and string.format("   |cffffd100Est. Deposit:|r %s", PF.Formatter.FormatMoney(opp.totalDepositRisk))
             or ""
         local profStr = PF.Formatter.FormatMoney(opp.totalProfit)
         detailFrame.metricsText:SetText(string.format(
@@ -346,19 +492,19 @@ function PF.DetailWindow.RefreshIfShown()
 
             local invStatus
             if liveInBags >= item.totalQuantity then
-                invStatus = string.format("|cff00ff00Ready in Bags: %d / %d|r", liveInBags, item.totalQuantity)
+                invStatus = string.format("|cff00ff00Ready: %d / %d|r", liveInBags, item.totalQuantity)
             else
                 local bankNote = (liveInBank > 0) and string.format(" (+%d bank)", liveInBank) or ""
-                invStatus = string.format("|cffffcc00Have: %d / %d%s — Buy %d more|r", liveInBags, item.totalQuantity, bankNote, item.remainingToBuy)
+                invStatus = string.format("|cffffcc00Have: %d / %d%s — Buy %d|r", liveInBags, item.totalQuantity, bankNote, item.remainingToBuy)
             end
 
             local priceInfo
             if item.source == "Vendor" then
-                priceInfo = string.format("Vendor: %s ea (Total %s)", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
+                priceInfo = string.format("Vendor: %s ea (%s)", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
             elseif item.minUnitPrice ~= item.maxUnitPrice then
-                priceInfo = string.format("Avg %s (Max %s) | Total %s", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.maxUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
+                priceInfo = string.format("Avg %s (Max %s) | %s", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.maxUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
             else
-                priceInfo = string.format("AH: %s ea (Total %s)", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
+                priceInfo = string.format("AH: %s ea (%s)", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
             end
 
             if row.statusText then
@@ -391,5 +537,10 @@ function PF.DetailWindow.RefreshIfShown()
         else
             detailFrame.recipeBtn:Hide()
         end
+    end
+
+    UpdateScrollRange()
+    if _G.C_Timer and _G.C_Timer.After then
+        _G.C_Timer.After(0, UpdateScrollRange)
     end
 end

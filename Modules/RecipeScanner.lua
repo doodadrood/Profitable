@@ -218,10 +218,16 @@ function PF.RecipeScanner.ScanModernTradeSkillUI()
         return 0
     end
 
-    local professionName = "Profession"
-    if _G.C_TradeSkillUI.GetBaseProfessionInfo then
+    local professionName = "Crafting"
+    if _G.C_TradeSkillUI.GetChildProfessionInfo then
+        local okChild, childInfo = pcall(_G.C_TradeSkillUI.GetChildProfessionInfo)
+        if okChild and type(childInfo) == "table" and type(childInfo.professionName) == "string" and childInfo.professionName ~= "" then
+            professionName = childInfo.professionName
+        end
+    end
+    if professionName == "Crafting" and _G.C_TradeSkillUI.GetBaseProfessionInfo then
         local okProf, profInfo = pcall(_G.C_TradeSkillUI.GetBaseProfessionInfo)
-        if okProf and type(profInfo) == "table" and profInfo.professionName then
+        if okProf and type(profInfo) == "table" and type(profInfo.professionName) == "string" and profInfo.professionName ~= "" then
             professionName = profInfo.professionName
         end
     end

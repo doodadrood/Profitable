@@ -468,4 +468,32 @@ PF.SideWindow.RefreshRows()
 local hmBtn1 = _G["PF_SideWindowHMButton1"]
 Assert(hmBtn1 ~= nil and hmBtn1:IsShown() and hmBtn1._opportunity ~= nil, "SideWindow displays Honorable Mention button 1")
 
+-- 15. Test DetailWindow Dynamic Anchoring & Mouse-Wheel ScrollFrame for Multi-Step Plays
+PF.DetailWindow.ShowOpportunity(lgsPlay) -- Has 5 shopping list rows + multi-line explanation
+local sf = PF.DetailWindow.frame.scrollFrame
+local sb = PF.DetailWindow.frame.scrollBar
+Assert(sf ~= nil and sb ~= nil, "DetailWindow creates ScrollFrame and ScrollBar")
+-- Trigger mouse-wheel scroll down (-1) when content exceeds viewport
+local longOpp = {
+    actionLabel = "Craft and AH",
+    itemId = 7941,
+    itemName = "Ornate Mithril Pants",
+    itemLink = "[Ornate Mithril Pants]",
+    quantity = 3,
+    totalCost = 41397,
+    totalNetRevenue = 99918,
+    totalAHCut = 5400,
+    totalDepositRisk = 2676,
+    totalProfit = 58521,
+    roiPercent = 141,
+    explanation = string.rep("Intermediate Crafting Step: Craft 12x Mithril Bar from raw materials.\n\n", 8),
+    shoppingList = lgsPlay.shoppingList,
+}
+PF.DetailWindow.ShowOpportunity(longOpp)
+Assert(sf._maxScroll > 0 and sb:IsShown() == true, "DetailWindow activates ScrollBar when multi-step explanation + shopping list exceeds viewport height")
+sf.scripts["OnMouseWheel"](sf, -1)
+Assert(sf._currentScroll > 0, "Mouse wheel down scrolls DetailWindow content")
+sf.scripts["OnMouseWheel"](sf, 1)
+Assert(sf._currentScroll == 0, "Mouse wheel up scrolls DetailWindow back to top")
+
 print("\nAll Profitable test assertions passed successfully!")

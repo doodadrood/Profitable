@@ -766,12 +766,19 @@ function PF.OpportunityEngine.BuildDetailedExplanation(opp)
     end
 
     if opp.intermediateSteps and #opp.intermediateSteps > 0 then
+        local stepLines = { "Intermediate Crafting Steps (per unit):" }
         for _, step in ipairs(opp.intermediateSteps) do
-            table.insert(lines, string.format(
-                "Intermediate Step (%s): Craft %dx %s per unit from raw materials instead of buying overpriced bolts/bars.",
-                step.profession or "Craft", step.countPerUnit or 1, step.recipeName or "intermediate material"
+            local profLabel = (type(step.profession) == "string" and step.profession ~= "" and step.profession ~= "Profession" and step.profession ~= "TradeSkill")
+                and (" (" .. step.profession .. ")")
+                or ""
+            table.insert(stepLines, string.format(
+                "  • Craft %dx %s%s from raw materials",
+                step.countPerUnit or 1,
+                step.recipeName or "intermediate material",
+                profLabel
             ))
         end
+        table.insert(lines, table.concat(stepLines, "\n"))
     end
 
     if opp.deBreakdown and opp.deBreakdown.drops and #opp.deBreakdown.drops > 0 then
