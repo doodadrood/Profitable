@@ -17,9 +17,15 @@ local onFinishCallback = nil
 -- ItemKeyInfo async callbacks: [itemId] = { callback1, callback2, ... }
 local itemKeyCallbacks = {}
 
+-- Exact itemKey cache per itemId (preserves non-zero itemLevel / itemSuffix for gear from BrowseResults)
+local knownItemKeys = {}         -- [itemId] = itemKeyTable
+local pendingBrowseResolve = nil -- { itemId, itemName, desiredQuantity }
+
 -- Active / Pending Default AH UI Purchase State
 local activeSearchItemId = nil
+local activeSearchItemKey = nil
 local pendingCommodityConfirm = nil -- { itemId, itemName, quantity, unitPrice, totalPrice, maxUnitPrice }
+local purchasedAuctionIds = {}      -- [auctionID] = true (prevents bidding on the same auctionID twice)
 
 local function SafeRegisterEvent(frame, eventName)
     if frame and frame.RegisterEvent then
@@ -47,7 +53,40 @@ function PF.AHVerifier.IsRunning()
     return isRunning
 end
 
+-- Harvests exact itemKeys (including itemLevel and itemSuffix for green/blue gear)
+-- from C_AuctionHouse.GetBrowseResults() whenever browse results arrive.
+local function HarvestBrowseResultItemKeys(results)
+    if type(results) ~= "table" then
+        if _G.C_AuctionHouse and _G.C_AuctionHouse.GetBrowseResults then
+            local ok, br = pcall(_G.C_AuctionHouse.GetBrowseResults)
+            if ok and type(br) == "table" then
+                results = br
+            end
+        end
+    end
+    if type(results) ~= "table" then return end
+
+    local bestPriceById = {}
+    for _, row in ipairs(results) do
+        local key = row and row.itemKey
+        local itemId = key and key.itemID
+        local minPrice = row and row.minPrice
+        local totalQty = row and row.totalQuantity
+        if itemId and itemId > 0 and totalQty and totalQty > 0 then
+            if not knownItemKeys[itemId] or (minPrice and minPrice > 0 and (not bestPriceById[itemId] or minPrice < bestPriceById[itemId])) then
+                knownItemKeys[itemId] = key
+                if minPrice and minPrice > 0 then
+                    bestPriceById[itemId] = minPrice
+                end
+            end
+        end
+    end
+end
+
 function PF.AHVerifier.MakeItemKey(itemId)
+    if itemId and knownItemKeys[itemId] then
+        return knownItemKeys[itemId]
+    end
     if _G.C_AuctionHouse and _G.C_AuctionHouse.MakeItemKey then
         local ok, key = pcall(_G.C_AuctionHouse.MakeItemKey, itemId)
         if ok and type(key) == "table" then
@@ -79,9 +118,6 @@ local function PollPendingItemKeys()
     end
 end
 
--- Waits for C_AuctionHouse.GetItemKeyInfo(itemKey) to be cached in the client before
--- invoking callback(itemKey, itemKeyInfo). Uses both ITEM_KEY_ITEM_INFO_RECEIVED and
--- an OnUpdate poller so it resolves immediately on the next frame once cached.
 function PF.AHVerifier.WithItemKeyInfo(itemId, callback)
     if not itemId or itemId <= 0 or type(callback) ~= "function" then
         return false
@@ -109,7 +145,6 @@ function PF.AHVerifier.WithItemKeyInfo(itemId, callback)
 end
 
 function PF.AHVerifier.GetAppropriateSorts(itemKeyInfo)
-    -- In C_AuctionHouse: sortOrder 0 = UnitPrice (for commodities), sortOrder 4 = Buyout (for items)
     if itemKeyInfo and itemKeyInfo.isCommodity == false then
         return { { sortOrder = 4, reverseSort = false } }
     end
@@ -314,7 +349,11 @@ local function CollectModernItemResults(itemId, itemKey)
     if not _G.C_AuctionHouse or not _G.C_AuctionHouse.GetNumItemSearchResults or not _G.C_AuctionHouse.GetItemSearchResultInfo then
         return false
     end
-    itemKey = itemKey or PF.AHVerifier.MakeItemKey(itemId)
+    if type(itemKey) == "table" and itemKey.itemID then
+        knownItemKeys[itemKey.itemID] = itemKey
+        activeSearchItemKey = itemKey
+    end
+    itemKey = itemKey or activeSearchItemKey or PF.AHVerifier.MakeItemKey(itemId)
     local okNum, num = pcall(_G.C_AuctionHouse.GetNumItemSearchResults, itemKey)
     if not okNum or not num or num <= 0 then
         return false
@@ -400,7 +439,8 @@ ScheduleNextVerification = function(delay)
                 PF.AHVerifier.WithItemKeyInfo(target.itemId, function(itemKey, itemKeyInfo)
                     if not isRunning or runToken ~= myToken or currentQueryItem ~= target then return end
                     local sorts = PF.AHVerifier.GetAppropriateSorts(itemKeyInfo)
-                    pcall(_G.C_AuctionHouse.SendSearchQuery, itemKey, sorts, false)
+                    local isItem = (itemKeyInfo and itemKeyInfo.isCommodity == false)
+                    pcall(_G.C_AuctionHouse.SendSearchQuery, itemKey, sorts, isItem)
                 end)
                 C_Timer.After(2.5, function()
                     if isRunning and runToken == myToken and currentQueryItem == target then
@@ -420,6 +460,8 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
     callbacks = callbacks or {}
     onUpdateCallback = callbacks.onUpdate
     onFinishCallback = callbacks.onFinish
+
+    HarvestBrowseResultItemKeys()
 
     isRunning = true
     runToken = runToken + 1
@@ -499,9 +541,37 @@ local function SetDefaultCommoditiesUIQuantity(desiredQuantity)
     end
 end
 
+local function OpenItemKeyInDefaultAH(itemId, itemKey, itemKeyInfo, desiredQuantity)
+    if not _G.AuctionHouseFrame then return end
+    activeSearchItemId = itemId
+    activeSearchItemKey = itemKey
+    knownItemKeys[itemId] = itemKey
+
+    local minPrice = (PF.OpportunityEngine and PF.OpportunityEngine.ResolveAHPrice and PF.OpportunityEngine.ResolveAHPrice(itemId)) or 0
+
+    -- SelectBrowseResult automatically switches AuctionHouseFrame into CommoditiesBuyFrame or ItemBuyFrame
+    -- AND sends the internal C_AuctionHouse.SendSearchQuery for that itemKey!
+    -- IMPORTANT: Do NOT call C_AuctionHouse.SendSearchQuery a second time if SelectBrowseResult exists,
+    -- because sending two throttled queries on the same tick causes C_AuctionHouse to drop the message!
+    if _G.AuctionHouseFrame.SelectBrowseResult then
+        pcall(_G.AuctionHouseFrame.SelectBrowseResult, _G.AuctionHouseFrame, {
+            itemKey = itemKey,
+            minPrice = minPrice,
+            totalQuantity = desiredQuantity,
+        })
+        _G.AuctionHouseFrame.displayMode = nil
+        SetDefaultCommoditiesUIQuantity(desiredQuantity)
+    elseif _G.C_AuctionHouse and _G.C_AuctionHouse.SendSearchQuery then
+        local sorts = PF.AHVerifier.GetAppropriateSorts(itemKeyInfo)
+        local isItem = (itemKeyInfo and itemKeyInfo.isCommodity == false)
+        pcall(_G.C_AuctionHouse.SendSearchQuery, itemKey, sorts, isItem)
+    end
+end
+
 -- Navigates the Default WoW: Forever Auction House UI (AuctionHouseFrame) directly into
--- the item's purchase view (CommoditiesBuyFrame or ItemBuyFrame), pre-filling the quantity
--- and loading its live listings via C_AuctionHouse.SendSearchQuery.
+-- the item's purchase view (CommoditiesBuyFrame or ItemBuyFrame).
+-- For non-commodity gear (whose itemKey on the AH may have a non-zero itemLevel or itemSuffix),
+-- if we don't yet have its exact browse itemKey, it resolves it from GetBrowseResults() first.
 function PF.AHVerifier.SearchItemOnAH(itemId, itemName, itemLink, desiredQuantity)
     local meta = PF.VendorDatabase.GetItemMetadata(itemId, itemLink)
     local searchName = itemName or (meta and meta.name)
@@ -515,6 +585,7 @@ function PF.AHVerifier.SearchItemOnAH(itemId, itemName, itemLink, desiredQuantit
 
     desiredQuantity = math.max(1, math.floor(tonumber(desiredQuantity) or 1))
     activeSearchItemId = itemId
+    purchasedAuctionIds = {}
 
     -- 1. Legacy AuctionFrame (BrowseTab) fallback
     if _G.AuctionFrame and (not _G.AuctionHouseFrame or not _G.AuctionHouseFrame:IsShown()) then
@@ -535,6 +606,8 @@ function PF.AHVerifier.SearchItemOnAH(itemId, itemName, itemLink, desiredQuantit
 
     -- 2. Default WoW: Forever AuctionHouseFrame UI
     if _G.AuctionHouseFrame then
+        HarvestBrowseResultItemKeys()
+
         local searchBar = _G.AuctionHouseFrame.SearchBar
         if searchBar and searchBar.SearchBox and searchBar.SearchBox.SetText and searchName then
             pcall(searchBar.SearchBox.SetText, searchBar.SearchBox, searchName)
@@ -543,36 +616,44 @@ function PF.AHVerifier.SearchItemOnAH(itemId, itemName, itemLink, desiredQuantit
         if itemId and itemId > 0 and _G.C_AuctionHouse then
             SafeRegisterEvent(verifierFrame, "COMMODITY_SEARCH_RESULTS_UPDATED")
             SafeRegisterEvent(verifierFrame, "ITEM_SEARCH_RESULTS_UPDATED")
+            SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+            SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
 
             PF.AHVerifier.WithItemKeyInfo(itemId, function(itemKey, itemKeyInfo)
-                local minPrice = (PF.OpportunityEngine and PF.OpportunityEngine.ResolveAHPrice and PF.OpportunityEngine.ResolveAHPrice(itemId)) or 0
-
-                -- Switch the default Blizzard AuctionHouseFrame directly into CommoditiesBuyFrame or ItemBuyFrame
-                if _G.AuctionHouseFrame.SelectBrowseResult then
-                    pcall(_G.AuctionHouseFrame.SelectBrowseResult, _G.AuctionHouseFrame, {
-                        itemKey = itemKey,
-                        minPrice = minPrice,
-                        totalQuantity = desiredQuantity,
+                -- For non-commodity equipment (weapons/armor), if we don't yet have a specific itemKey
+                -- from GetBrowseResults (which carries the exact itemLevel/itemSuffix listed on the AH),
+                -- run a quick Browse query by name first so we open the exact itemKey that has listings!
+                local isNonCommodity = (itemKeyInfo and itemKeyInfo.isCommodity == false)
+                if isNonCommodity and not knownItemKeys[itemId] and searchName and _G.C_AuctionHouse.SendBrowseQuery then
+                    pendingBrowseResolve = {
+                        itemId = itemId,
+                        itemName = searchName,
+                        desiredQuantity = desiredQuantity,
+                    }
+                    pcall(_G.C_AuctionHouse.SendBrowseQuery, {
+                        searchString = searchName,
+                        sorts = {},
+                        filters = {},
                     })
-                    -- Clear displayMode field as Auctionator does so bag/tab state never gets stuck
-                    _G.AuctionHouseFrame.displayMode = nil
+                    -- Fallback if browse results don't resolve a more specific key within 0.6s
+                    C_Timer.After(0.6, function()
+                        if pendingBrowseResolve and pendingBrowseResolve.itemId == itemId then
+                            pendingBrowseResolve = nil
+                            OpenItemKeyInDefaultAH(itemId, knownItemKeys[itemId] or itemKey, itemKeyInfo, desiredQuantity)
+                        end
+                    end)
+                    return
                 end
 
-                SetDefaultCommoditiesUIQuantity(desiredQuantity)
-
-                local sorts = PF.AHVerifier.GetAppropriateSorts(itemKeyInfo)
-                if _G.C_AuctionHouse.SendSearchQuery then
-                    pcall(_G.C_AuctionHouse.SendSearchQuery, itemKey, sorts, false)
-                end
+                OpenItemKeyInDefaultAH(itemId, knownItemKeys[itemId] or itemKey, itemKeyInfo, desiredQuantity)
             end)
             return true
         end
 
         if _G.C_AuctionHouse and _G.C_AuctionHouse.SendBrowseQuery and searchName then
-            local sortOrder = (_G.Enum and _G.Enum.AuctionHouseSortOrder and _G.Enum.AuctionHouseSortOrder.Price) or 0
             pcall(_G.C_AuctionHouse.SendBrowseQuery, {
                 searchString = searchName,
-                sorts = { { sortOrder = sortOrder, reverseSort = false } },
+                sorts = {},
                 filters = {},
             })
             return true
@@ -621,37 +702,65 @@ local function GetLoadedQualifyingCommodityQty(itemId, maxUnitPrice, neededQty, 
 end
 
 -- Finds the cheapest loaded non-commodity auction at or below maxUnitPrice
+-- Checks both the cached/active itemKey AND the currently open AuctionHouseFrame.ItemBuyFrame.itemKey!
 local function GetLoadedQualifyingItemAuction(itemId, maxUnitPrice, playerGold)
     if not _G.C_AuctionHouse or not _G.C_AuctionHouse.GetNumItemSearchResults or not _G.C_AuctionHouse.GetItemSearchResultInfo then
-        return 0, nil
+        return 0, nil, nil
     end
-    local itemKey = PF.AHVerifier.MakeItemKey(itemId)
-    local okNum, num = pcall(_G.C_AuctionHouse.GetNumItemSearchResults, itemKey)
-    if not okNum or not num or num <= 0 then
-        return 0, nil
+
+    local candidateKeys = {}
+    if _G.AuctionHouseFrame and _G.AuctionHouseFrame.ItemBuyFrame and _G.AuctionHouseFrame.ItemBuyFrame.itemKey then
+        local uiKey = _G.AuctionHouseFrame.ItemBuyFrame.itemKey
+        if uiKey.itemID == itemId then
+            table.insert(candidateKeys, uiKey)
+        end
+    end
+    if activeSearchItemKey and activeSearchItemKey.itemID == itemId then
+        table.insert(candidateKeys, activeSearchItemKey)
+    end
+    if knownItemKeys[itemId] then
+        table.insert(candidateKeys, knownItemKeys[itemId])
+    end
+    table.insert(candidateKeys, { itemID = itemId, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 })
+
+    local matchedKey = nil
+    local num = 0
+    for _, key in ipairs(candidateKeys) do
+        local okNum, n = pcall(_G.C_AuctionHouse.GetNumItemSearchResults, key)
+        if okNum and n and n > 0 then
+            matchedKey = key
+            num = n
+            break
+        end
+    end
+
+    if not matchedKey or num <= 0 then
+        return 0, nil, nil
     end
 
     local bestResult = nil
     local bestUnitPrice = nil
 
     for i = 1, num do
-        local okRow, row = pcall(_G.C_AuctionHouse.GetItemSearchResultInfo, itemKey, i)
+        local okRow, row = pcall(_G.C_AuctionHouse.GetItemSearchResultInfo, matchedKey, i)
         if okRow and type(row) == "table" and not row.containsOwnerItem and not row.containsAccountItem then
-            local buyout = row.buyoutAmount
-            local qty = (row.quantity and row.quantity > 0) and row.quantity or 1
-            if buyout and buyout > 0 and (not playerGold or buyout <= playerGold) then
-                local unitPrice = math.floor(buyout / qty)
-                if not maxUnitPrice or unitPrice <= maxUnitPrice then
-                    if not bestUnitPrice or unitPrice < bestUnitPrice then
-                        bestUnitPrice = unitPrice
-                        bestResult = row
+            if not row.auctionID or not purchasedAuctionIds[row.auctionID] then
+                local buyout = row.buyoutAmount
+                local qty = (row.quantity and row.quantity > 0) and row.quantity or 1
+                if buyout and buyout > 0 and (not playerGold or buyout <= playerGold) then
+                    local unitPrice = math.floor(buyout / qty)
+                    if not maxUnitPrice or unitPrice <= maxUnitPrice then
+                        if not bestUnitPrice or unitPrice < bestUnitPrice then
+                            bestUnitPrice = unitPrice
+                            bestResult = row
+                        end
                     end
                 end
             end
         end
     end
 
-    return num, bestResult
+    return num, bestResult, matchedKey
 end
 
 -- Automatically opens the next unpurchased AH item from the active opportunity in the default AH UI
@@ -704,9 +813,9 @@ function PF.AHVerifier.GetBuyButtonLabel(item)
 end
 
 -- Executes purchasing through the Default WoW: Forever Auction House UI:
--- 1. If a commodity purchase quote is awaiting confirmation (COMMODITY_PRICE_UPDATED), confirms it via C_AuctionHouse.ConfirmCommoditiesPurchase!
--- 2. If the item's listings are loaded in C_AuctionHouse, starts the commodity purchase (StartCommoditiesPurchase) or places the buyout (PlaceBid)!
--- 3. If the item is not open yet in the Default AH UI, opens it via AuctionHouseFrame:SelectBrowseResult and loads its listings!
+-- IMPORTANT: Never call SearchItemOnAH / SendSearchQuery on the same click right before
+-- StartCommoditiesPurchase or PlaceBid, because sending a search query consumes the single
+-- C_AuctionHouse throttled message slot and causes the purchase packet to be dropped!
 function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neededQty)
     if not itemId or itemId <= 0 then return false end
     neededQty = math.max(1, math.floor(tonumber(neededQty) or 1))
@@ -807,8 +916,7 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
 
     -- 3. Default WoW: Forever C_AuctionHouse + AuctionHouseFrame Path
     if _G.C_AuctionHouse then
-        -- Step 3A: If we already have a pending commodity quote from StartCommoditiesPurchase,
-        -- this hardware click confirms the purchase via C_AuctionHouse.ConfirmCommoditiesPurchase!
+        -- Step 3A: Confirm a pending commodity quote from StartCommoditiesPurchase
         if pendingCommodityConfirm and pendingCommodityConfirm.itemId == itemId then
             local conf = pendingCommodityConfirm
             pendingCommodityConfirm = nil
@@ -830,7 +938,7 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
             return true, conf.quantity, conf.totalPrice or 0, "BOUGHT"
         end
 
-        -- Step 3B: Check if Commodity Search Results are loaded for this itemId
+        -- Step 3B: Commodity Search Results are ALREADY loaded for this itemId -> StartCommoditiesPurchase directly!
         local numComm, buyQty, estTotalCost = GetLoadedQualifyingCommodityQty(itemId, maxUnitPrice, neededQty, playerGold)
         if numComm > 0 then
             if buyQty <= 0 then
@@ -842,8 +950,12 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
                 return false, 0, 0, "NO_CHEAP_LISTING"
             end
 
-            -- Ensure the item is displayed in the default AuctionHouseFrame.CommoditiesBuyFrame with buyQty filled in
-            PF.AHVerifier.SearchItemOnAH(itemId, itemName, nil, buyQty)
+            if _G.C_AuctionHouse.IsThrottledMessageSystemReady and not _G.C_AuctionHouse.IsThrottledMessageSystemReady() then
+                print("|cffff9900[Profitable]|r Auction House is busy — click again in a moment.")
+                return false, 0, 0, "THROTTLED"
+            end
+
+            SetDefaultCommoditiesUIQuantity(buyQty)
 
             SafeRegisterEvent(verifierFrame, "COMMODITY_PRICE_UPDATED")
             SafeRegisterEvent(verifierFrame, "COMMODITY_PRICE_UNAVAILABLE")
@@ -878,28 +990,43 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
             return true, buyQty, estTotalCost, "QUOTE_STARTED"
         end
 
-        -- Step 3C: Check if Non-Commodity Item Search Results are loaded for this itemId
+        -- Step 3C: Non-Commodity Item Search Results are ALREADY loaded -> PlaceBid directly!
         local numItem, bestAuction = GetLoadedQualifyingItemAuction(itemId, maxUnitPrice, playerGold)
         if numItem > 0 then
             if not bestAuction or not bestAuction.auctionID or not bestAuction.buyoutAmount then
                 print(string.format(
-                    "|cffff5555[Profitable]|r No [%s] listings available at or below %s.",
+                    "|cffff5555[Profitable]|r No remaining [%s] listings available at or below %s.",
                     itemName or ("Item #" .. itemId),
                     PF.Formatter.FormatMoney(maxUnitPrice or 0)
                 ))
                 return false, 0, 0, "NO_CHEAP_LISTING"
             end
 
-            PF.AHVerifier.SearchItemOnAH(itemId, itemName, nil, neededQty)
+            if _G.C_AuctionHouse.IsThrottledMessageSystemReady and not _G.C_AuctionHouse.IsThrottledMessageSystemReady() then
+                print("|cffff9900[Profitable]|r Auction House is busy — click again in a moment.")
+                return false, 0, 0, "THROTTLED"
+            end
+
+            -- Select the auction in the Default Blizzard ItemBuyFrame if exposed, then call PlaceBid directly
+            -- WITHOUT calling SearchItemOnAH (which would send a new search query and drop PlaceBid)!
+            if _G.AuctionHouseFrame and _G.AuctionHouseFrame.ItemBuyFrame and _G.AuctionHouseFrame.ItemBuyFrame.SetAuction then
+                pcall(_G.AuctionHouseFrame.ItemBuyFrame.SetAuction, _G.AuctionHouseFrame.ItemBuyFrame, bestAuction.auctionID)
+            end
+
             if _G.C_AuctionHouse.PlaceBid then
+                purchasedAuctionIds[bestAuction.auctionID] = true
                 pcall(_G.C_AuctionHouse.PlaceBid, bestAuction.auctionID, bestAuction.buyoutAmount)
                 local qty = (bestAuction.quantity and bestAuction.quantity > 0) and bestAuction.quantity or 1
                 print(string.format(
-                    "|cff00ff88[Profitable]|r Purchased %dx [%s] for %s!",
+                    "|cff00ff88[Profitable]|r Buying %dx [%s] (auction #%s) for %s!",
                     qty,
                     itemName or ("Item #" .. itemId),
+                    tostring(bestAuction.auctionID),
                     PF.Formatter.FormatMoney(bestAuction.buyoutAmount)
                 ))
+                if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
+                    PF.DetailWindow.RefreshIfShown()
+                end
                 return true, qty, bestAuction.buyoutAmount, "BOUGHT"
             end
         end
@@ -907,9 +1034,8 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
         -- Step 3D: Listings for this item aren't loaded yet — open the item in Default AuctionHouseFrame now!
         PF.AHVerifier.SearchItemOnAH(itemId, itemName, nil, neededQty)
         print(string.format(
-            "|cff00ff88[Profitable]|r Opened [%s] (x%d) in the Auction House. Click 'Buy %dx' now that listings are loaded!",
+            "|cff00ff88[Profitable]|r Opening [%s] (x%d) in the Auction House... Wait 1s for listings to appear, then click Buy!",
             itemName or ("Item #" .. itemId),
-            neededQty,
             neededQty
         ))
         return false, 0, 0, "OPENING_ITEM"
@@ -922,9 +1048,26 @@ function PF.AHVerifier.Init()
     if PF.AHVerifier._initialized then return end
     PF.AHVerifier._initialized = true
 
+    SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
+
     verifierFrame:SetScript("OnEvent", function(_, event, arg1, arg2)
         if event == "ITEM_KEY_ITEM_INFO_RECEIVED" then
             PollPendingItemKeys()
+            return
+        end
+
+        if event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" or event == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
+            HarvestBrowseResultItemKeys(type(arg1) == "table" and arg1 or nil)
+            if pendingBrowseResolve then
+                local req = pendingBrowseResolve
+                if knownItemKeys[req.itemId] then
+                    pendingBrowseResolve = nil
+                    PF.AHVerifier.WithItemKeyInfo(req.itemId, function(resolvedKey, resolvedInfo)
+                        OpenItemKeyInDefaultAH(req.itemId, knownItemKeys[req.itemId] or resolvedKey, resolvedInfo, req.desiredQuantity)
+                    end)
+                end
+            end
             return
         end
 

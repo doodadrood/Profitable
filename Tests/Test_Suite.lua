@@ -359,4 +359,57 @@ row1Shop.buyBtn:Click() -- Start another quote
 PF.AHVerifier.frame:Trigger("COMMODITY_PRICE_UPDATED", 19000, 380000) -- Spiked above 11200 max!
 Assert(cancelledPurchase == true and row1Shop.buyBtn:GetText() == "Buy 20x", "Auto-cancel commodity purchase if server price spikes above maxUnitPrice")
 
+-- 13. Test Non-Commodity Equipment Purchase (Duskwoven Sash / Silver-lined Belt)
+-- Ensure:
+-- (a) Exact itemKey with non-zero itemLevel/itemSuffix is harvested from BrowseResults
+-- (b) PlaceBid is called WITHOUT calling SelectBrowseResult/SendSearchQuery on the same click (avoiding throttle drop)
+-- (c) Clicking Buy 1x twice buys auctionID #101 first and auctionID #102 second (never re-bidding on #101)
+local placedModernBids = {}
+local selectBrowseCallsDuringBuy = 0
+_G.C_AuctionHouse.GetBrowseResults = function()
+    return {
+        {
+            itemKey = { itemID = 10056, itemLevel = 31, itemSuffix = 12, battlePetSpeciesID = 0 },
+            minPrice = 3400,
+            totalQuantity = 2,
+        }
+    }
+end
+itemKeyCache[10056] = { itemID = 10056, itemName = "Duskwoven Sash", isCommodity = false, quality = 2 }
+_G.C_AuctionHouse.GetNumItemSearchResults = function(key)
+    -- Only returns > 0 when queried with the real itemLevel=31, itemSuffix=12 itemKey!
+    if type(key) == "table" and key.itemID == 10056 and key.itemLevel == 31 and key.itemSuffix == 12 then
+        return 2
+    end
+    return 0
+end
+_G.C_AuctionHouse.GetItemSearchResultInfo = function(key, idx)
+    if type(key) == "table" and key.itemID == 10056 and key.itemLevel == 31 then
+        local rows = {
+            { auctionID = 101, buyoutAmount = 3400, quantity = 1, containsOwnerItem = false },
+            { auctionID = 102, buyoutAmount = 3500, quantity = 1, containsOwnerItem = false },
+        }
+        return rows[idx]
+    end
+    return nil
+end
+_G.C_AuctionHouse.PlaceBid = function(auctionID, buyoutAmount)
+    table.insert(placedModernBids, { auctionID = auctionID, buyoutAmount = buyoutAmount })
+end
+
+-- Harvest browse itemKey and open Duskwoven Sash
+PF.AHVerifier.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+PF.AHVerifier.SearchItemOnAH(10056, "Duskwoven Sash", nil, 2)
+
+_G.AuctionHouseFrame.SelectBrowseResult = function(self, rowData)
+    selectBrowseCallsDuringBuy = selectBrowseCallsDuringBuy + 1
+end
+
+local okBuy1 = PF.AHVerifier.BuyNextCheapListing(10056, "Duskwoven Sash", 4000, 2)
+Assert(okBuy1 == true and #placedModernBids == 1 and placedModernBids[1].auctionID == 101 and placedModernBids[1].buyoutAmount == 3400, "First click on non-commodity equipment calls PlaceBid(101, 3400)")
+Assert(selectBrowseCallsDuringBuy == 0, "Do NOT call SelectBrowseResult/SendSearchQuery on the same click before PlaceBid")
+
+local okBuy2 = PF.AHVerifier.BuyNextCheapListing(10056, "Duskwoven Sash", 4000, 2)
+Assert(okBuy2 == true and #placedModernBids == 2 and placedModernBids[2].auctionID == 102 and placedModernBids[2].buyoutAmount == 3500, "Second click advances to next auctionID (102 @ 35s) instead of repeating auctionID 101")
+
 print("\nAll Profitable test assertions passed successfully!")
