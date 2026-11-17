@@ -314,13 +314,15 @@ function PF.DisenchantDatabase.EvaluateDisenchant(itemId, itemLink, resolveAHPri
             local expectedGross = expectedUnits * unitPrice
             grossExpected = grossExpected + expectedGross
 
-            local dropMeta = PF.VendorDatabase.GetItemMetadata(drop.itemId)
-            local dropName = (dropMeta and dropMeta.name) or string.format("Item #%d", drop.itemId)
+            local dropMeta = PF.VendorDatabase.GetItemMetadata(targetSellItemId) or PF.VendorDatabase.GetItemMetadata(drop.itemId)
+            local dropName = (dropMeta and dropMeta.name) or string.format("Item #%d", targetSellItemId)
+            local dropQuality = (dropMeta and dropMeta.quality) or 1
             table.insert(breakdown, {
                 itemId = drop.itemId,
                 sellItemId = targetSellItemId,
                 name = dropName,
-                link = PF.Formatter.BuildItemLink(drop.itemId, dropName, dropMeta and dropMeta.quality),
+                quality = dropQuality,
+                link = PF.Formatter.BuildItemLink(targetSellItemId, dropName, dropQuality),
                 prob = drop.prob,
                 minQty = drop.minQty,
                 maxQty = drop.maxQty,
@@ -340,10 +342,20 @@ function PF.DisenchantDatabase.EvaluateDisenchant(itemId, itemLink, resolveAHPri
     local grossCopper = math.floor(grossExpected + 0.5)
     local netCopper = math.floor(grossExpected * (1 - cut) + 0.5)
 
+    -- Identify the primary target enchanting material (the drop contributing the most net value)
+    local primaryMat = breakdown[1]
+    for _, d in ipairs(breakdown) do
+        if d.expectedNet > (primaryMat and primaryMat.expectedNet or -1) then
+            primaryMat = d
+        end
+    end
+
     return {
         grossValue = grossCopper,
         netValue = netCopper,
         ahCut = grossCopper - netCopper,
         drops = breakdown,
+        primaryMat = primaryMat,
+        isShardOrCrystal = (primaryMat and (primaryMat.quality or 1) >= 3) or false,
     }
 end

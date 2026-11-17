@@ -124,13 +124,15 @@ _G.CreateFrame = function(frameType, name, parent, template)
         }
     end
     function frame:CreateFontString(...)
-        local fs = { text = "" }
+        local fs = { text = "", shown = true }
         function fs:SetPoint(...) end
         function fs:SetWidth(...) end
         function fs:SetJustifyH(...) end
         function fs:SetJustifyV(...) end
         function fs:SetText(t) self.text = t end
         function fs:GetText() return self.text end
+        function fs:Show() self.shown = true end
+        function fs:Hide() self.shown = false end
         return fs
     end
     return frame

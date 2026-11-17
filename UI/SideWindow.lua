@@ -7,7 +7,9 @@ PF.SideWindow = {}
 local sideFrame = nil
 local eventFrame = CreateFrame("Frame")
 local playButtons = {}
+local hmButtons = {}
 local TOP_ROWS = 5
+local HM_ROWS = 2
 
 local function SetBackdropSafe(frame, bgR, bgG, bgB, bgA)
     if not frame then return end
@@ -23,24 +25,24 @@ local function SetBackdropSafe(frame, bgR, bgG, bgB, bgA)
     end
 end
 
-local function CreatePlayRow(parent, rank)
-    local btn = CreateFrame("Button", "PF_SideWindowPlayButton" .. rank, parent)
-    if btn.SetSize then btn:SetSize(336, 48) end
+local function CreateOpportunityButton(parent, frameName, yOffset, bgR, bgG, bgB)
+    local btn = CreateFrame("Button", frameName, parent)
+    if btn.SetSize then btn:SetSize(336, 46) end
     if btn.SetPoint then
-        btn:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -104 - ((rank - 1) * 54))
+        btn:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, yOffset)
     end
-    SetBackdropSafe(btn, 0.11, 0.13, 0.16, 0.92)
+    SetBackdropSafe(btn, bgR or 0.11, bgG or 0.13, bgB or 0.16, 0.92)
 
     local mainText = btn.CreateFontString and btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     if mainText then
-        if mainText.SetPoint then mainText:SetPoint("TOPLEFT", btn, "TOPLEFT", 8, -7) end
+        if mainText.SetPoint then mainText.SetPoint(mainText, "TOPLEFT", btn, "TOPLEFT", 8, -6) end
         if mainText.SetWidth then mainText:SetWidth(320) end
         if mainText.SetJustifyH then mainText:SetJustifyH("LEFT") end
     end
 
     local subText = btn.CreateFontString and btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     if subText then
-        if subText.SetPoint then subText:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 8, 6) end
+        if subText.SetPoint then subText:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 8, 5) end
         if subText.SetWidth then subText:SetWidth(320) end
         if subText.SetJustifyH then subText:SetJustifyH("LEFT") end
     end
@@ -75,7 +77,7 @@ end
 
 local function AnchorToAuctionHouse()
     if not sideFrame or not sideFrame.SetPoint then return end
-    local ahParent = _G.AuctionFrame or _G.AuctionHouseFrame
+    local ahParent = _G.AuctionHouseFrame or _G.AuctionFrame
     if ahParent and (not ahParent.IsShown or ahParent:IsShown()) then
         if sideFrame.ClearAllPoints then sideFrame:ClearAllPoints() end
         sideFrame:SetPoint("TOPLEFT", ahParent, "TOPRIGHT", 6, 0)
@@ -89,7 +91,7 @@ local function EnsureSideWindow()
     end
 
     sideFrame = CreateFrame("Frame", "PF_AuctionSideWindow", _G.UIParent)
-    if sideFrame.SetSize then sideFrame:SetSize(360, 390) end
+    if sideFrame.SetSize then sideFrame:SetSize(360, 505) end
     if sideFrame.SetPoint then sideFrame:SetPoint("TOPLEFT", _G.UIParent, "TOPLEFT", 850, -100) end
     if sideFrame.SetFrameStrata then sideFrame:SetFrameStrata("HIGH") end
     if sideFrame.SetMovable then sideFrame:SetMovable(true) end
@@ -160,11 +162,26 @@ local function EnsureSideWindow()
     local subBanner = sideFrame.CreateFontString and sideFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     if subBanner then
         if subBanner.SetPoint then subBanner:SetPoint("TOPLEFT", sideFrame, "TOPLEFT", 12, -82) end
-        if subBanner.SetText then subBanner:SetText("Click any opportunity below for breakdown & shopping list:") end
+        if subBanner.SetText then subBanner:SetText("Top 5 Plays (1 per end-result market — click to expand):") end
     end
 
     for i = 1, TOP_ROWS do
-        playButtons[i] = CreatePlayRow(sideFrame, i)
+        local yOff = -102 - ((i - 1) * 50)
+        playButtons[i] = CreateOpportunityButton(sideFrame, "PF_SideWindowPlayButton" .. i, yOff, 0.11, 0.13, 0.16)
+    end
+
+    -- Honorable Mentions Section Header
+    local hmHeader = sideFrame.CreateFontString and sideFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    if hmHeader then
+        if hmHeader.SetPoint then hmHeader:SetPoint("TOPLEFT", sideFrame, "TOPLEFT", 12, -360) end
+        if hmHeader.SetText then
+            hmHeader:SetText("|cffffd100Honorable Mentions (Best Craft & Vendor Plays):|r")
+        end
+    end
+
+    for i = 1, HM_ROWS do
+        local yOff = -380 - ((i - 1) * 50)
+        hmButtons[i] = CreateOpportunityButton(sideFrame, "PF_SideWindowHMButton" .. i, yOff, 0.13, 0.11, 0.15)
     end
 
     sideFrame.infoText = infoText
@@ -172,10 +189,33 @@ local function EnsureSideWindow()
     sideFrame.statusBar = statusBar
     sideFrame.statusText = statusText
     sideFrame.playButtons = playButtons
+    sideFrame.hmHeader = hmHeader
+    sideFrame.hmButtons = hmButtons
 
     AnchorToAuctionHouse()
     PF.SideWindow.frame = sideFrame
     return sideFrame
+end
+
+local function PopulateRowButton(btn, opp, rankOrPrefix)
+    btn._opportunity = opp
+    btn:Show()
+    local line1
+    if type(rankOrPrefix) == "number" then
+        line1 = PF.OpportunityEngine.FormatOpportunityLine(rankOrPrefix, opp)
+    else
+        line1 = PF.OpportunityEngine.FormatOpportunityLine(nil, opp, rankOrPrefix)
+    end
+    local verTag = opp.verified and "|cff00ff00[Verified]|r" or "|cffffcc00[Cached]|r"
+    local recTag = (opp.recipe and opp.recipe.isTrainerRecommendation)
+        and string.format(" |cff00ccff[%s]|r", opp.recipe.sourceHint or "Trainer")
+        or ""
+    local line2 = string.format(
+        "   Qty: %dx  |  ROI: %d%%  |  %s%s  —  |cff88ccffClick to expand|r",
+        opp.quantity or 1, opp.roiPercent or 0, verTag, recTag
+    )
+    if btn.mainText then btn.mainText:SetText(line1) end
+    if btn.subText then btn.subText:SetText(line2) end
 end
 
 function PF.SideWindow.UpdateProgress(currentIdx, totalCount, targetItem)
@@ -212,24 +252,13 @@ function PF.SideWindow.RefreshRows()
     end
 
     local plays = (Profitable_DB and Profitable_DB.lastTopPlays) or {}
+    local hms = (Profitable_DB and Profitable_DB.lastHonorableMentions) or {}
 
     for i = 1, TOP_ROWS do
         local btn = playButtons[i]
         local opp = plays[i]
         if opp then
-            btn._opportunity = opp
-            btn:Show()
-            local line1 = PF.OpportunityEngine.FormatOpportunityLine(i, opp)
-            local verTag = opp.verified and "|cff00ff00[Verified]|r" or "|cffffcc00[Cached]|r"
-            local recTag = (opp.recipe and opp.recipe.isTrainerRecommendation)
-                and string.format(" |cff00ccff[%s]|r", opp.recipe.sourceHint or "Trainer")
-                or ""
-            local line2 = string.format(
-                "   Qty: %dx  |  ROI: %d%%  |  %s%s  —  |cff88ccffClick to expand|r",
-                opp.quantity or 1, opp.roiPercent or 0, verTag, recTag
-            )
-            if btn.mainText then btn.mainText:SetText(line1) end
-            if btn.subText then btn.subText:SetText(line2) end
+            PopulateRowButton(btn, opp, i)
         else
             btn._opportunity = nil
             if i == 1 and #plays == 0 then
@@ -243,6 +272,26 @@ function PF.SideWindow.RefreshRows()
             else
                 btn:Hide()
             end
+        end
+    end
+
+    if sideFrame.hmHeader then
+        if #hms > 0 then
+            if sideFrame.hmHeader.Show then sideFrame.hmHeader:Show() end
+        else
+            if sideFrame.hmHeader.Hide then sideFrame.hmHeader:Hide() end
+        end
+    end
+
+    for i = 1, HM_ROWS do
+        local btn = hmButtons[i]
+        local opp = hms[i]
+        if opp then
+            local prefix = (opp.hmCategory == "Top Craft") and "|cff00ccff[Craft]|r" or "|cffffd100[Vendor]|r"
+            PopulateRowButton(btn, opp, prefix)
+        else
+            btn._opportunity = nil
+            btn:Hide()
         end
     end
 end
@@ -275,7 +324,7 @@ function PF.SideWindow.RunSearch()
         onUpdate = function(idx, total, target)
             PF.SideWindow.UpdateProgress(idx, total, target)
         end,
-        onFinish = function(finalPlays)
+        onFinish = function()
             PF.SideWindow.Refresh()
         end,
     })
@@ -317,8 +366,6 @@ function PF.SideWindow.Init()
                 if sideFrame then
                     sideFrame:Hide()
                 end
-                -- Note: DetailWindow intentionally stays open outside the AH so the player
-                -- can track their inventory at the Mailbox, Vendor, and Anvil!
             elseif event == "PLAYER_MONEY" then
                 if sideFrame and (not sideFrame.IsShown or sideFrame:IsShown()) then
                     PF.SideWindow.RefreshRows()

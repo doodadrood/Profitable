@@ -412,4 +412,60 @@ Assert(selectBrowseCallsDuringBuy == 0, "Do NOT call SelectBrowseResult/SendSear
 local okBuy2 = PF.AHVerifier.BuyNextCheapListing(10056, "Duskwoven Sash", 4000, 2)
 Assert(okBuy2 == true and #placedModernBids == 2 and placedModernBids[2].auctionID == 102 and placedModernBids[2].buyoutAmount == 3500, "Second click advances to next auctionID (102 @ 35s) instead of repeating auctionID 101")
 
+-- 14. Test End-Result DE Material Lane Aggregation & Honorable Mentions (Craft & Vendor)
+-- Simulate 5 different Rare (Blue) items at ilvl 28 that ALL disenchant into Large Glimmering Shard (11084, 8g on AH)
+for i = 1, 5 do
+    local blueId = 90000 + i
+    Profitable_DB.itemCache[blueId] = {
+        name = "Rare Blue Sword #" .. i,
+        quality = 3,
+        itemLevel = 28,
+        classID = 2,
+        invType = "INVTYPE_WEAPON",
+        vendorSell = 5000,
+    }
+    -- Listed at 1g + i*10s each (all well below 7g 60s net DE value of Large Glimmering Shard!)
+    _G.PCF_DB.prices[blueId] = { minBuyout = 10000 + (i * 1000), count = 1, lastUpdated = Mock.currentTime }
+end
+
+-- Also add 2 extra lower-profit DE material markets so Top 5 can be filled by distinct DE mats, pushing Craft/Vendor to Honorable Mentions
+_G.PCF_DB.prices[11137] = { minBuyout = 40000, count = 50, lastUpdated = Mock.currentTime } -- Vision Dust = 4g
+_G.PCF_DB.prices[11176] = { minBuyout = 50000, count = 50, lastUpdated = Mock.currentTime } -- Dream Dust = 5g
+Profitable_DB.itemCache[90010] = { name = "Vision Green Armor", quality = 2, itemLevel = 38, classID = 4, invType = "INVTYPE_CHEST", vendorSell = 1000 }
+_G.PCF_DB.prices[90010] = { minBuyout = 10000, count = 5, lastUpdated = Mock.currentTime }
+Profitable_DB.itemCache[90011] = { name = "Dream Green Armor", quality = 2, itemLevel = 48, classID = 4, invType = "INVTYPE_CHEST", vendorSell = 1000 }
+_G.PCF_DB.prices[90011] = { minBuyout = 10000, count = 5, lastUpdated = Mock.currentTime }
+
+local top5Lanes, _, honorableMentions = PF.OpportunityEngine.FindTopOpportunities(220000)
+
+-- Count how many rows in Top 5 have endResultKey == "DE_MAT:11084" (Large Glimmering Shard)
+local lgsCount = 0
+local lgsPlay = nil
+for _, p in ipairs(top5Lanes) do
+    if p.endResultKey == "DE_MAT:11084" then
+        lgsCount = lgsCount + 1
+        lgsPlay = p
+    end
+end
+Assert(lgsCount == 1, "All 5 Rare items that DE into Large Glimmering Shard aggregate into exactly 1 Top-5 row")
+Assert(lgsPlay ~= nil and lgsPlay.distinctItemCount == 5 and #lgsPlay.shoppingList == 5, "Aggregated Large Glimmering Shard play contains all 5 distinct blue items in its shopping list")
+Assert(lgsPlay.summaryLine:find("Large Glimmering Shard") ~= nil and lgsPlay.summaryLine:find("5 items") ~= nil, "Summary line shows aggregated target DE material and item count")
+
+-- Verify no two plays in Top 5 share the same endResultKey
+local seenKeys = {}
+local anyDuplicateKey = false
+for _, p in ipairs(top5Lanes) do
+    if seenKeys[p.endResultKey] then anyDuplicateKey = true end
+    seenKeys[p.endResultKey] = true
+end
+Assert(anyDuplicateKey == false, "Zero duplicate end-result markets across all Top 5 rows")
+
+-- Verify Honorable Mentions surface Top Craft and/or Top Vendor plays not in Top 5
+Assert(type(honorableMentions) == "table" and #honorableMentions >= 1, "Compute Honorable Mentions for best Craft / Vendor plays")
+Profitable_DB.lastTopPlays = top5Lanes
+Profitable_DB.lastHonorableMentions = honorableMentions
+PF.SideWindow.RefreshRows()
+local hmBtn1 = _G["PF_SideWindowHMButton1"]
+Assert(hmBtn1 ~= nil and hmBtn1:IsShown() and hmBtn1._opportunity ~= nil, "SideWindow displays Honorable Mention button 1")
+
 print("\nAll Profitable test assertions passed successfully!")

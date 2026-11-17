@@ -38,7 +38,8 @@ local defaultConfig = {
         minROIPercent = 5,                       -- Minimum 5% ROI to avoid tying up all gold for pennies
         maxAHCraftUnits = 20,                    -- Cap per-play crafted units for fast-moving AH trade goods/consumables
         maxAHGearUnits = 3,                      -- Cap per-play crafted units for slow-moving AH armor/weapons
-        maxDEUnits = 50,                         -- Cap per-play DE units
+        maxDEUnits = 30,                         -- Cap per-play DE units for dust/essence plays
+        maxShardDEUnits = 8,                     -- Cap per-play DE units when primary target is a Shard/Crystal
         maxVendorUnits = 200,                    -- Vendor plays have infinite demand, capped only by AH supply & gold
         includeAllCharRecipes = false,           -- false = only current logged-in character's recipes
         includeSkillMatchedBaselineRecipes = true, -- Use built-in recipe DB matching character skill rank
@@ -53,9 +54,10 @@ local defaultConfig = {
     vendorBuyPrices = {}, -- [itemId] = copperPrice (learned dynamically from vendors + static DB)
     vendorAlerts = {},    -- Recent limited-supply vendor arbitrage opportunities found at NPCs
     itemCache = {},       -- [itemId] = { name, link, quality, itemLevel, classID, subClassID, invType, texture, vendorSell }
-    orderBookCache = {},  -- [itemId] = { timestamp = 0, listings = { { unitPrice = 0, quantity = 0 }, ... } }
-    lastTopPlays = {},    -- Cached top 5 opportunities from most recent run
-    activePlay = nil,     -- Currently tracked opportunity in DetailWindow
+    orderBookCache = {},        -- [itemId] = { timestamp = 0, listings = { { unitPrice = 0, quantity = 0 }, ... } }
+    lastTopPlays = {},          -- Cached top 5 opportunities from most recent run
+    lastHonorableMentions = {}, -- Cached honorable mention plays (Top Craft & Top Vendor)
+    activePlay = nil,           -- Currently tracked opportunity in DetailWindow
 }
 
 local function ApplyDefaults(target, defaults)

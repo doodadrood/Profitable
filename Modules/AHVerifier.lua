@@ -227,14 +227,16 @@ local function FinalizeRun(reason)
     currentQueryItem = nil
     runToken = runToken + 1
 
-    local topPlays = PF.OpportunityEngine.FindTopOpportunities()
+    local topPlays, _, honorableMentions = PF.OpportunityEngine.FindTopOpportunities()
     MarkVerifiedOpportunities(topPlays, verifiedInSession)
+    MarkVerifiedOpportunities(honorableMentions, verifiedInSession)
 
     Profitable_DB = Profitable_DB or {}
     Profitable_DB.lastTopPlays = topPlays
+    Profitable_DB.lastHonorableMentions = honorableMentions
 
     if onFinishCallback then
-        onFinishCallback(topPlays, reason or "COMPLETE")
+        onFinishCallback(topPlays, reason or "COMPLETE", honorableMentions)
     end
     if PF.SideWindow and PF.SideWindow.Refresh then
         PF.SideWindow.Refresh()
@@ -401,9 +403,11 @@ ScheduleNextVerification = function(delay)
         local target = verifyQueue[verifyIndex]
         currentQueryItem = target
 
-        local topPlays = PF.OpportunityEngine.FindTopOpportunities()
+        local topPlays, _, honorableMentions = PF.OpportunityEngine.FindTopOpportunities()
         MarkVerifiedOpportunities(topPlays, verifiedInSession)
+        MarkVerifiedOpportunities(honorableMentions, verifiedInSession)
         Profitable_DB.lastTopPlays = topPlays
+        Profitable_DB.lastHonorableMentions = honorableMentions
 
         if onUpdateCallback then
             onUpdateCallback(verifyIndex, #verifyQueue, target, topPlays)
@@ -474,9 +478,11 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
     local settings = (Profitable_DB and Profitable_DB.settings) or {}
     local candidateCount = settings.verifyCandidateCount or 10
 
-    local initialTop = PF.OpportunityEngine.FindTopOpportunities(nil, nil, candidateCount)
+    local initialTop, _, initialHM = PF.OpportunityEngine.FindTopOpportunities(nil, nil, candidateCount)
+    local top5, _, hm = PF.OpportunityEngine.FindTopOpportunities()
     Profitable_DB = Profitable_DB or {}
-    Profitable_DB.lastTopPlays = PF.OpportunityEngine.FindTopOpportunities()
+    Profitable_DB.lastTopPlays = top5
+    Profitable_DB.lastHonorableMentions = hm
 
     local queuedIds = {}
     local function EnqueueItem(itemId, itemName)
@@ -491,18 +497,24 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
         })
     end
 
-    for _, opp in ipairs(initialTop) do
-        if opp.shoppingList then
-            for _, shop in ipairs(opp.shoppingList) do
-                if shop.source == "AH" then
-                    EnqueueItem(shop.itemId, shop.name)
+    local function EnqueuePlayList(list)
+        if type(list) ~= "table" then return end
+        for _, opp in ipairs(list) do
+            if opp.shoppingList then
+                for _, shop in ipairs(opp.shoppingList) do
+                    if shop.source == "AH" then
+                        EnqueueItem(shop.itemId, shop.name)
+                    end
                 end
             end
-        end
-        if opp.actionType == "CRAFT_AH" then
-            EnqueueItem(opp.itemId, opp.itemName)
+            if opp.actionType == "CRAFT_AH" then
+                EnqueueItem(opp.itemId, opp.itemName)
+            end
         end
     end
+
+    EnqueuePlayList(initialTop)
+    EnqueuePlayList(initialHM)
 
     if #verifyQueue == 0 or not PF.AHVerifier.IsAuctionHouseOpen() then
         for _, q in ipairs(verifyQueue) do
