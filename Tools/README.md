@@ -18,8 +18,10 @@ This optional companion script pulls live Auction House & Commodity order-book s
 
 ```bash
 python3 /home/T/Projects/Profitable/Tools/sync_forever_ah.py --setup
-python3 /home/T/Projects/Profitable/Tools/sync_forever_ah.py --region us --ruleset 1 --faction horde
+python3 /home/T/Projects/Profitable/Tools/sync_forever_ah.py --region us --ruleset 1 --house-id 113
 ```
+
+*(House ID `113` corresponds to **US PvP Horde** on WoW: Forever.)*
 
 To inspect available auction house IDs on your ruleset:
 
