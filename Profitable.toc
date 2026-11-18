@@ -2,7 +2,7 @@
 ## Title: Profitable |cff00ff88(PF)|r
 ## Notes: Finds the top 5 most profitable AH, Vendor, Crafting, and Disenchanting plays using PriceCheckerForever data and live order-book verification.
 ## Author: PCF Dev Team
-## Version: 1.0.1
+## Version: 1.1.0
 ## SavedVariables: Profitable_DB
 ## Dependencies: PriceCheckerForever
 ## OptionalDeps: TradeSkillMaster, Auctionator
