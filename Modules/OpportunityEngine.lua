@@ -23,19 +23,24 @@ function PF.OpportunityEngine.ResolveAHPrice(itemId, itemLink)
     -- 1. Check live verified orderBookCache if fresh (within 10 minutes)
     if Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[itemId] then
         local ob = Profitable_DB.orderBookCache[itemId]
-        if type(ob.listings) == "table" and #ob.listings > 0 and (time() - (ob.timestamp or 0)) <= 600 then
-            local totalQty = 0
-            local minUnit = nil
-            for _, tier in ipairs(ob.listings) do
-                if tier.unitPrice and tier.unitPrice > 0 and tier.quantity and tier.quantity > 0 then
-                    totalQty = totalQty + tier.quantity
-                    if not minUnit or tier.unitPrice < minUnit then
-                        minUnit = tier.unitPrice
+        if (time() - (ob.timestamp or 0)) <= 600 then
+            if ob.unavailable then
+                return nil, 0, nil
+            end
+            if type(ob.listings) == "table" and #ob.listings > 0 then
+                local totalQty = 0
+                local minUnit = nil
+                for _, tier in ipairs(ob.listings) do
+                    if tier.unitPrice and tier.unitPrice > 0 and tier.quantity and tier.quantity > 0 then
+                        totalQty = totalQty + tier.quantity
+                        if not minUnit or tier.unitPrice < minUnit then
+                            minUnit = tier.unitPrice
+                        end
                     end
                 end
-            end
-            if minUnit and totalQty > 0 then
-                return minUnit, totalQty, "Verified AH"
+                if minUnit and totalQty > 0 then
+                    return minUnit, totalQty, "Verified AH"
+                end
             end
         end
     end
@@ -81,8 +86,13 @@ function PF.OpportunityEngine.GetOrderBook(itemId, customOrderBooks)
         rawListings = customOrderBooks[itemId]
     elseif Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[itemId] then
         local ob = Profitable_DB.orderBookCache[itemId]
-        if type(ob.listings) == "table" and #ob.listings > 0 and (time() - (ob.timestamp or 0)) <= 600 then
-            rawListings = ob.listings
+        if (time() - (ob.timestamp or 0)) <= 600 then
+            if ob.unavailable then
+                return {}
+            end
+            if type(ob.listings) == "table" and #ob.listings > 0 then
+                rawListings = ob.listings
+            end
         end
     end
 
@@ -837,6 +847,9 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
     local maxAHCraftUnits = settings.maxAHCraftUnits or 20
     local maxAHGearUnits = settings.maxAHGearUnits or 3
     local deductDeposit = (settings.deductExpectedDeposit ~= false)
+    local allowVendorPlays = (settings.showVendorPlays ~= false)
+    local allowCraftPlays = (settings.showCraftPlays ~= false)
+    local allowDEPlays = (settings.assumeCanDisenchant ~= false)
 
     local resolveExitUnit = function(id)
         local rawPrice = PF.OpportunityEngine.ResolveAHPrice(id)
@@ -881,7 +894,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
             local vendorSell = PF.VendorDatabase.GetVendorSellPrice(itemId)
 
             -- Strategy A: Direct AH Buy -> Vendor
-            if vendorSell and vendorSell > minBuyout then
+            if allowVendorPlays and vendorSell and vendorSell > minBuyout then
                 table.insert(candidates, {
                     actionType = "VENDOR",
                     itemId = itemId,
@@ -899,7 +912,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
             end
 
             -- Strategy B: Direct AH Buy -> Disenchant
-            if PF.DisenchantDatabase.CanDisenchant(itemId) then
+            if allowDEPlays and PF.DisenchantDatabase.CanDisenchant(itemId) then
                 local deEval = PF.DisenchantDatabase.EvaluateDisenchant(itemId, nil, resolveExitUnit, ahCut)
                 if deEval and deEval.netValue > minBuyout then
                     if not vendorSell or deEval.netValue > vendorSell then
@@ -967,7 +980,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                 end
             end
 
-            if craftVendorRev > 0 then
+            if allowCraftPlays and craftVendorRev > 0 then
                 table.insert(candidates, {
                     actionType = "CRAFT_VENDOR",
                     itemId = outId,
@@ -985,7 +998,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                 })
             end
 
-            if craftAHNet > 0 then
+            if allowCraftPlays and craftAHNet > 0 then
                 table.insert(candidates, {
                     actionType = "CRAFT_AH",
                     itemId = outId,
@@ -1004,7 +1017,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                 })
             end
 
-            if craftDENet > 0 then
+            if allowDEPlays and craftDENet > 0 then
                 local isShard = deEval and deEval.isShardOrCrystal == true
                 table.insert(candidates, {
                     actionType = "CRAFT_DE",

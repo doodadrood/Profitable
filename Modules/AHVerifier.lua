@@ -196,6 +196,7 @@ function PF.AHVerifier.RecordOrderBook(itemId, listings)
     Profitable_DB.orderBookCache[itemId] = {
         timestamp = time(),
         listings = merged,
+        unavailable = false,
     }
 
     if minUnit and totalCount > 0 then
@@ -209,6 +210,29 @@ function PF.AHVerifier.RecordOrderBook(itemId, listings)
             source = "Scan",
         }
     end
+end
+
+-- Evicts an item from orderBookCache and PCF_DB.prices when a live AH check confirms
+-- there are zero qualifying buyout listings (e.g. bid-only auctions or sold out).
+function PF.AHVerifier.EvictUnavailableItem(itemId)
+    if not itemId or itemId <= 0 then return end
+    Profitable_DB = Profitable_DB or {}
+    Profitable_DB.orderBookCache = Profitable_DB.orderBookCache or {}
+    Profitable_DB.orderBookCache[itemId] = {
+        timestamp = time(),
+        listings = {},
+        unavailable = true,
+    }
+    if _G.PCF_DB and type(_G.PCF_DB.prices) == "table" then
+        _G.PCF_DB.prices[itemId] = nil
+    end
+end
+
+local function IsBuyoutOnlyEnabled()
+    if Profitable_DB and Profitable_DB.settings and Profitable_DB.settings.buyoutOnly == false then
+        return false
+    end
+    return true
 end
 
 local function MarkVerifiedOpportunities(opportunities, verifiedItemMap)
@@ -236,6 +260,66 @@ local function MarkVerifiedOpportunities(opportunities, verifiedItemMap)
 end
 
 local verifiedInSession = {}
+local activeQueuedIds = {}
+local activeForceLiveVerify = false
+local activeFeedFreshWindow = false
+
+local function EnqueueVerificationItem(itemId, itemName)
+    if not itemId or itemId <= 0 or activeQueuedIds[itemId] then return end
+    if PF.VendorDatabase.IsVendorReagent(itemId) then return end
+    activeQueuedIds[itemId] = true
+    if not activeForceLiveVerify then
+        local feedHasItem = activeFeedFreshWindow and PF.MarketFeed.GetItemData and (PF.MarketFeed.GetItemData(itemId) ~= nil)
+        if feedHasItem then
+            verifiedInSession[itemId] = true
+            return
+        end
+    end
+    local meta = PF.VendorDatabase.GetItemMetadata(itemId)
+    local resolvedName = itemName or (meta and meta.name) or string.format("Item #%d", itemId)
+    table.insert(verifyQueue, {
+        itemId = itemId,
+        name = resolvedName,
+    })
+end
+
+local function EnqueuePlayList(list)
+    if type(list) ~= "table" then return end
+    for _, opp in ipairs(list) do
+        if opp.shoppingList then
+            for _, shop in ipairs(opp.shoppingList) do
+                if shop.source == "AH" then
+                    EnqueueVerificationItem(shop.itemId, shop.name)
+                end
+            end
+        end
+        if opp.actionType == "CRAFT_AH" then
+            EnqueueVerificationItem(opp.itemId, opp.itemName)
+        elseif opp.actionType == "BUY_DE" or opp.actionType == "CRAFT_DE" then
+            if opp.targetMatId then
+                EnqueueVerificationItem(opp.targetMatId, opp.targetMatName)
+            end
+            if opp.deBreakdown and type(opp.deBreakdown.drops) == "table" then
+                for _, d in ipairs(opp.deBreakdown.drops) do
+                    local matId = d.sellItemId or d.itemId
+                    if matId then
+                        EnqueueVerificationItem(matId, d.name)
+                    end
+                end
+            end
+        end
+    end
+end
+
+function PF.AHVerifier.RecalculateFromCache()
+    local topPlays, _, honorableMentions = PF.OpportunityEngine.FindTopOpportunities()
+    MarkVerifiedOpportunities(topPlays, verifiedInSession)
+    MarkVerifiedOpportunities(honorableMentions, verifiedInSession)
+    Profitable_DB = Profitable_DB or {}
+    Profitable_DB.lastTopPlays = topPlays
+    Profitable_DB.lastHonorableMentions = honorableMentions
+    return topPlays, honorableMentions
+end
 
 local function FinalizeRun(reason)
     isRunning = false
@@ -313,7 +397,9 @@ local function CollectLegacyQueryResults(targetItem)
         return false
     end
     local numBatch = _G.GetNumAuctionItems("list") or 0
+    local buyoutOnly = IsBuyoutOnlyEnabled()
     local listings = {}
+    local sawMatchingItem = false
 
     for i = 1, numBatch do
         local name, _, count, _, _, _, _, minBid, _, buyoutPrice, _, _, _, _, _, _, itemId = _G.GetAuctionItemInfo("list", i)
@@ -325,10 +411,17 @@ local function CollectLegacyQueryResults(targetItem)
         end
         local matchesId = (itemId and itemId == targetItem.itemId)
         local matchesName = (not itemId and name and targetItem.name and name:lower() == targetItem.name:lower())
-        if (matchesId or matchesName) and buyoutPrice and buyoutPrice > 0 and count and count > 0 then
-            local unitPrice = math.floor(buyoutPrice / count)
-            if unitPrice > 0 then
-                table.insert(listings, { unitPrice = unitPrice, quantity = count })
+        if matchesId or matchesName then
+            sawMatchingItem = true
+            local effectivePrice = (buyoutPrice and buyoutPrice > 0) and buyoutPrice or nil
+            if not effectivePrice and not buyoutOnly then
+                effectivePrice = (minBid and minBid > 0) and minBid or nil
+            end
+            if effectivePrice and effectivePrice > 0 and count and count > 0 then
+                local unitPrice = math.floor(effectivePrice / count)
+                if unitPrice > 0 then
+                    table.insert(listings, { unitPrice = unitPrice, quantity = count })
+                end
             end
         end
     end
@@ -337,6 +430,9 @@ local function CollectLegacyQueryResults(targetItem)
         PF.AHVerifier.RecordOrderBook(targetItem.itemId, listings)
         verifiedInSession[targetItem.itemId] = true
         return true
+    end
+    if sawMatchingItem then
+        PF.AHVerifier.EvictUnavailableItem(targetItem.itemId)
     end
     return false
 end
@@ -347,6 +443,9 @@ local function CollectModernCommodityResults(itemId)
     end
     local okNum, num = pcall(_G.C_AuctionHouse.GetNumCommoditySearchResults, itemId)
     if not okNum or not num or num <= 0 then
+        if okNum and num == 0 then
+            PF.AHVerifier.EvictUnavailableItem(itemId)
+        end
         return false
     end
     local listings = {}
@@ -361,6 +460,7 @@ local function CollectModernCommodityResults(itemId)
         verifiedInSession[itemId] = true
         return true
     end
+    PF.AHVerifier.EvictUnavailableItem(itemId)
     return false
 end
 
@@ -375,13 +475,20 @@ local function CollectModernItemResults(itemId, itemKey)
     itemKey = itemKey or activeSearchItemKey or PF.AHVerifier.MakeItemKey(itemId)
     local okNum, num = pcall(_G.C_AuctionHouse.GetNumItemSearchResults, itemKey)
     if not okNum or not num or num <= 0 then
+        if okNum and num == 0 then
+            PF.AHVerifier.EvictUnavailableItem(itemId)
+        end
         return false
     end
+    local buyoutOnly = IsBuyoutOnlyEnabled()
     local listings = {}
     for i = 1, num do
         local okRow, row = pcall(_G.C_AuctionHouse.GetItemSearchResultInfo, itemKey, i)
         if okRow and type(row) == "table" then
-            local buyout = row.buyoutAmount or row.minBid or row.bidAmount
+            local buyout = (row.buyoutAmount and row.buyoutAmount > 0) and row.buyoutAmount or nil
+            if not buyout and not buyoutOnly then
+                buyout = row.bidAmount or row.minBid
+            end
             local qty = (row.quantity and row.quantity > 0) and row.quantity or 1
             if buyout and buyout > 0 then
                 local unitPrice = math.floor(buyout / qty)
@@ -396,6 +503,8 @@ local function CollectModernItemResults(itemId, itemKey)
         verifiedInSession[itemId] = true
         return true
     end
+    -- Listings exist on the AH (num > 0), but none have a buyout price (all bid-only)
+    PF.AHVerifier.EvictUnavailableItem(itemId)
     return false
 end
 
@@ -413,8 +522,15 @@ ScheduleNextVerification = function(delay)
 
         verifyIndex = verifyIndex + 1
         if verifyIndex > #verifyQueue then
-            FinalizeRun("COMPLETE")
-            return
+            if PF.AHVerifier.IsAuctionHouseOpen() and ShouldContinuePastTimeout() then
+                local currentTop, _, currentHM = PF.OpportunityEngine.FindTopOpportunities()
+                EnqueuePlayList(currentTop)
+                EnqueuePlayList(currentHM)
+            end
+            if verifyIndex > #verifyQueue then
+                FinalizeRun("COMPLETE")
+                return
+            end
         end
 
         local target = verifyQueue[verifyIndex]
@@ -523,43 +639,9 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
     Profitable_DB.lastTopPlays = top5
     Profitable_DB.lastHonorableMentions = hm
 
-    local queuedIds = {}
-    local function EnqueueItem(itemId, itemName)
-        if not itemId or itemId <= 0 or queuedIds[itemId] then return end
-        if PF.VendorDatabase.IsVendorReagent(itemId) then return end
-        queuedIds[itemId] = true
-        if not forceLiveVerify then
-            local ob = Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[itemId]
-            local obFresh = ob and ob.timestamp and (time() - ob.timestamp) <= 600
-            local feedHasItem = feedFreshWindow and PF.MarketFeed.GetItemData and (PF.MarketFeed.GetItemData(itemId) ~= nil)
-            if obFresh or feedHasItem then
-                verifiedInSession[itemId] = true
-                return
-            end
-        end
-        local meta = PF.VendorDatabase.GetItemMetadata(itemId)
-        local resolvedName = itemName or (meta and meta.name) or string.format("Item #%d", itemId)
-        table.insert(verifyQueue, {
-            itemId = itemId,
-            name = resolvedName,
-        })
-    end
-
-    local function EnqueuePlayList(list)
-        if type(list) ~= "table" then return end
-        for _, opp in ipairs(list) do
-            if opp.shoppingList then
-                for _, shop in ipairs(opp.shoppingList) do
-                    if shop.source == "AH" then
-                        EnqueueItem(shop.itemId, shop.name)
-                    end
-                end
-            end
-            if opp.actionType == "CRAFT_AH" then
-                EnqueueItem(opp.itemId, opp.itemName)
-            end
-        end
-    end
+    activeQueuedIds = {}
+    activeForceLiveVerify = forceLiveVerify
+    activeFeedFreshWindow = feedFreshWindow
 
     EnqueuePlayList(initialTop)
     EnqueuePlayList(initialHM)
@@ -1111,6 +1193,8 @@ function PF.AHVerifier.Init()
 
     SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
     SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
+    SafeRegisterEvent(verifierFrame, "COMMODITY_SEARCH_RESULTS_UPDATED")
+    SafeRegisterEvent(verifierFrame, "ITEM_SEARCH_RESULTS_UPDATED")
 
     verifierFrame:SetScript("OnEvent", function(_, event, arg1, arg2)
         if event == "ITEM_KEY_ITEM_INFO_RECEIVED" then

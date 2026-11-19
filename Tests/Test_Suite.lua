@@ -561,6 +561,18 @@ do
             end
             if opp.actionType == "CRAFT_AH" and opp.itemId then
                 feedItems[opp.itemId] = { m = 5000, q = 5, tiers = { { 5000, 5 } } }
+            elseif opp.actionType == "BUY_DE" or opp.actionType == "CRAFT_DE" then
+                if opp.targetMatId then
+                    feedItems[opp.targetMatId] = { m = 5000, q = 20, tiers = { { 5000, 20 } } }
+                end
+                if opp.deBreakdown and type(opp.deBreakdown.drops) == "table" then
+                    for _, d in ipairs(opp.deBreakdown.drops) do
+                        local matId = d.sellItemId or d.itemId
+                        if matId then
+                            feedItems[matId] = { m = d.unitPrice or 5000, q = 20, tiers = { { d.unitPrice or 5000, 20 } } }
+                        end
+                    end
+                end
             end
         end
     end
@@ -919,6 +931,149 @@ do
     end
     local statusFresh = _G.PF.GetAHDataStatus()
     Assert(statusFresh == "FRESH" and _G.PF_FindOpportunitiesButton:GetText() == "Find Top 5 Plays", "SideWindow automatically switches to 'Find Top 5 Plays' as soon as PCF scan completes")
+
+    -- 20. Test Buyout-Only Exclusion (Evicting Bid-Only Listings), Second-Run Live Re-Verification & Quick-Filter Tag Bubbles / Options Window
+    local nowTs = math.floor(Mock.currentTime)
+    _G.PCF_DB.lastFullScan = nowTs
+
+    -- 20A. Bid-Only item exclusion & live eviction
+    -- Item 95001 ("Bid-Only Rare Sword", DEs into Large Glimmering Shard 11084 worth 8g)
+    -- Initially appears in PCF_DB.prices at 100c (1s) from browse minPrice, but live AH has ONLY bid listings (no buyout)!
+    _G.Profitable_DB.itemCache[95001] = {
+        name = "Bid-Only Rare Sword",
+        quality = 3,
+        itemLevel = 28,
+        classID = 2,
+        invType = "INVTYPE_WEAPON",
+        vendorSell = 5000,
+    }
+    _G.PCF_DB.prices[11084] = { minBuyout = 80000, count = 10, lastUpdated = nowTs, source = "Scan" }
+    _G.PCF_DB.prices[95001] = { minBuyout = 100, count = 2, lastUpdated = nowTs, source = "PCF Sniff" }
+
+    local origCAH20 = _G.C_AuctionHouse
+    _G.C_AuctionHouse = {
+        MakeItemKey = function(id) return { itemID = id, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 } end,
+        GetItemKeyInfo = function(key) return { itemID = key.itemID, isCommodity = false } end,
+        SendSearchQuery = function() end,
+        GetNumItemSearchResults = function(key)
+            if type(key) == "table" and key.itemID == 95001 then return 2 end
+            return 0
+        end,
+        GetItemSearchResultInfo = function(key, idx)
+            if type(key) == "table" and key.itemID == 95001 then
+                local bidRows = {
+                    { auctionID = 501, minBid = 100, bidAmount = 150, buyoutAmount = nil, quantity = 1 },
+                    { auctionID = 502, minBid = 200, bidAmount = 0,   buyoutAmount = 0,   quantity = 1 },
+                }
+                return bidRows[idx]
+            end
+            return nil
+        end,
+    }
+
+    Assert(_G.Profitable_DB.settings.buyoutOnly == true, "buyoutOnly defaults to true (exclude bid-only auctions)")
+    _G.PF.AHVerifier.frame:Trigger("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 95001 })
+    Assert(_G.PCF_DB.prices[95001] == nil, "Live verification evicts bid-only item from PCF_DB.prices when buyoutOnly is ON")
+    Assert(_G.Profitable_DB.orderBookCache[95001] and _G.Profitable_DB.orderBookCache[95001].unavailable == true, "OrderBookCache marks bid-only item as unavailable")
+    Assert(_G.PF.OpportunityEngine.ResolveAHPrice(95001) == nil, "ResolveAHPrice returns nil for evicted bid-only item")
+
+    -- Toggling [Buyout Only] pill OFF allows bid-only listings; toggling back ON evicts them again
+    Assert(_G.PF_FilterTag_BuyoutOnly ~= nil, "Quick-filter tag bubble [Buyout Only] exists on SideWindow")
+    _G.PF_FilterTag_BuyoutOnly:Click()
+    Assert(_G.Profitable_DB.settings.buyoutOnly == false, "Clicking [Buyout Only] tag bubble toggles buyoutOnly OFF")
+    _G.PF.AHVerifier.frame:Trigger("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 95001 })
+    Assert(_G.PF.OpportunityEngine.ResolveAHPrice(95001) == 150, "When buyoutOnly is OFF, bid-only listings are accepted at their bid amount")
+
+    _G.PF_FilterTag_BuyoutOnly:Click()
+    Assert(_G.Profitable_DB.settings.buyoutOnly == true, "Clicking [Buyout Only] tag bubble toggles buyoutOnly back ON")
+    _G.PF.AHVerifier.frame:Trigger("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 95001 })
+    Assert(_G.PF.OpportunityEngine.ResolveAHPrice(95001) == nil, "Re-enabling buyoutOnly evicts bid-only item again")
+
+    -- 20B. Second-run live AH re-verification (never skip items just because orderBookCache is <10m old)
+    _G.Profitable_DB.itemCache[2447] = { name = "Peacebloom", quality = 1, itemLevel = 1, classID = 7, vendorSell = 13500 }
+    _G.PCF_DB.prices[2447] = { minBuyout = 11000, count = 20, lastUpdated = nowTs, source = "Scan" }
+    _G.Profitable_DB.orderBookCache[2447] = {
+        timestamp = nowTs - 15, -- Checked only 15 seconds ago on first run
+        listings = { { unitPrice = 11000, quantity = 20 } },
+        unavailable = false,
+    }
+    local secondRunQueries = 0
+    _G.C_AuctionHouse.GetItemKeyInfo = function(key) return { itemID = key.itemID, isCommodity = true } end
+    _G.C_AuctionHouse.SendSearchQuery = function() secondRunQueries = secondRunQueries + 1 end
+    _G.AuctionHouseFrame.IsShown = function() return true end
+    Mock.timers = {}
+    _G.PF.AHVerifier.StartDiscoveryAndVerification()
+    Assert(_G.PF.AHVerifier.IsRunning() == true, "Second run of StartDiscoveryAndVerification still runs live verification even when orderBookCache is <10m old")
+    local step20Timer = table.remove(Mock.timers, 1)
+    if step20Timer and step20Timer.callback then step20Timer.callback() end
+    Assert(secondRunQueries == 1, "Second run queries the live Auction House again to validate current price")
+    _G.PF.AHVerifier.Stop("TEST_20B_DONE")
+    Mock.timers = {}
+    _G.C_AuctionHouse = origCAH20
+
+    -- 20C. Quick-Toggle Filter Tag Bubbles ([Disenchant], [Craft], [Vendor]) & Options Panel (PF_SettingsWindow)
+    -- Seed all 3 play categories:
+    -- 1) BUY_DE: Item 95002 (Rare sword @ 1g -> Large Glimmering Shard 11084 @ 8g)
+    _G.Profitable_DB.itemCache[95002] = { name = "Buyout Rare Sword", quality = 3, itemLevel = 28, classID = 2, invType = "INVTYPE_WEAPON", vendorSell = 5000 }
+    _G.PCF_DB.prices[95002] = { minBuyout = 10000, count = 5, lastUpdated = nowTs, source = "Scan" }
+    -- 2) CRAFT_VENDOR: Copper Chain Pants (2846, vendorSell 1g 25s, crafted from 4x Copper Bar 2840 @ 20s = 80s)
+    _G.Profitable_DB.itemCache[2846] = { name = "Copper Chain Pants", quality = 1, itemLevel = 9, classID = 4, invType = "INVTYPE_LEGS", vendorSell = 12500 }
+    _G.PCF_DB.prices[2840] = { minBuyout = 2000, count = 80, lastUpdated = nowTs, source = "Scan" }
+    _G.PF.RecipeScanner.RegisterRecipe({
+        name = "Copper Chain Pants",
+        profession = "Blacksmithing",
+        outputItemId = 2846,
+        minMade = 1,
+        maxMade = 1,
+        avgMade = 1,
+        reagents = { { itemId = 2840, name = "Copper Bar", count = 4 } },
+    })
+    -- 3) VENDOR: Peacebloom (2447, vendorSell 1g 35s, AH buyout 1g 10s)
+    _G.PF.SideWindow.ApplyFilterChange()
+
+    local function CountActionTypes(plays)
+        local counts = { DE = 0, CRAFT = 0, VENDOR = 0 }
+        for _, p in ipairs(plays or {}) do
+            if p.actionType == "BUY_DE" or p.actionType == "CRAFT_DE" then
+                counts.DE = counts.DE + 1
+            elseif p.actionType == "CRAFT_AH" or p.actionType == "CRAFT_VENDOR" then
+                counts.CRAFT = counts.CRAFT + 1
+            elseif p.actionType == "VENDOR" then
+                counts.VENDOR = counts.VENDOR + 1
+            end
+        end
+        return counts
+    end
+
+    local cAll = CountActionTypes(_G.Profitable_DB.lastTopPlays)
+    Assert(cAll.DE >= 1 and cAll.CRAFT >= 1 and cAll.VENDOR >= 1, "All 3 play categories (DE, Craft, Vendor) present when all filter tags are ON")
+
+    -- Click [Disenchant] tag bubble OFF -> all DE plays immediately hidden
+    _G.PF_FilterTag_Disenchant:Click()
+    Assert(_G.Profitable_DB.settings.assumeCanDisenchant == false, "Clicking [Disenchant] tag bubble turns assumeCanDisenchant OFF")
+    local cNoDE = CountActionTypes(_G.Profitable_DB.lastTopPlays)
+    Assert(cNoDE.DE == 0 and cNoDE.CRAFT >= 1 and cNoDE.VENDOR >= 1, "Toggling [Disenchant] OFF immediately removes DE plays and keeps Craft/Vendor plays")
+
+    -- Click [Craft] tag bubble OFF -> all Craft plays immediately hidden
+    _G.PF_FilterTag_Craft:Click()
+    Assert(_G.Profitable_DB.settings.showCraftPlays == false, "Clicking [Craft] tag bubble turns showCraftPlays OFF")
+    local cOnlyVendor = CountActionTypes(_G.Profitable_DB.lastTopPlays)
+    Assert(cOnlyVendor.DE == 0 and cOnlyVendor.CRAFT == 0 and cOnlyVendor.VENDOR >= 1, "Toggling [Craft] OFF immediately removes Craft plays, leaving only Vendor plays")
+
+    -- Open Options Window via SideWindow 'Options' button and click 'Reset Filter Defaults'
+    Assert(_G.PF_SideWindowSettingsButton ~= nil, "SideWindow 'Options' button exists")
+    _G.PF_SideWindowSettingsButton:Click()
+    Assert(_G.PF_SettingsWindow ~= nil and _G.PF_SettingsWindow:IsShown() == true, "Clicking 'Options' opens PF_SettingsWindow")
+    _G.PF_SettingsResetButton:Click()
+    Assert(
+        _G.Profitable_DB.settings.assumeCanDisenchant == true
+            and _G.Profitable_DB.settings.showCraftPlays == true
+            and _G.Profitable_DB.settings.showVendorPlays == true
+            and _G.Profitable_DB.settings.buyoutOnly == true,
+        "Clicking 'Reset Filter Defaults' restores all filter settings to ON"
+    )
+    local cRestored = CountActionTypes(_G.Profitable_DB.lastTopPlays)
+    Assert(cRestored.DE >= 1 and cRestored.CRAFT >= 1 and cRestored.VENDOR >= 1, "Resetting filter defaults immediately restores DE, Craft, and Vendor plays")
 
     -- Restore outer test environment
     _G.C_AddOns = origCAddOns

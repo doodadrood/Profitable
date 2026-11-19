@@ -6,11 +6,101 @@ PF.SideWindow = {}
 
 local sideFrame = nil
 local onboardingFrame = nil
+local settingsFrame = nil
 local eventFrame = CreateFrame("Frame")
 local playButtons = {}
 local hmButtons = {}
+local filterTagButtons = {}
+local settingsCheckRows = {}
 local TOP_ROWS = 5
 local HM_ROWS = 2
+
+local FILTER_TAGS = {
+    {
+        key = "assumeCanDisenchant",
+        frameName = "PF_FilterTag_Disenchant",
+        label = "Disenchant",
+        defaultVal = true,
+        tooltipTitle = "Disenchant Plays ([Buy and DE] / [Craft and DE])",
+        tooltipDesc = "Toggle showing plays that require disenchanting uncommon/rare/epic gear. Turn OFF on non-enchanter characters if you don't want to disenchant.",
+    },
+    {
+        key = "showCraftPlays",
+        frameName = "PF_FilterTag_Craft",
+        label = "Craft",
+        defaultVal = true,
+        tooltipTitle = "Crafting Plays ([Craft and AH] / [Craft and Vendor])",
+        tooltipDesc = "Toggle showing profession crafting plays.",
+    },
+    {
+        key = "showVendorPlays",
+        frameName = "PF_FilterTag_Vendor",
+        label = "Vendor",
+        defaultVal = true,
+        tooltipTitle = "Direct Vendor Flips ([Vendor])",
+        tooltipDesc = "Toggle showing items listed on the Auction House below their NPC vendor sell price.",
+    },
+    {
+        key = "buyoutOnly",
+        frameName = "PF_FilterTag_BuyoutOnly",
+        label = "Buyout Only",
+        defaultVal = true,
+        tooltipTitle = "Buyout Only (Exclude Bid-Only Auctions)",
+        tooltipDesc = "When ON, strictly excludes AH listings that only have a bid option and no instant buyout price.",
+    },
+}
+
+local SETTINGS_OPTIONS = {
+    {
+        key = "buyoutOnly",
+        frameName = "PF_SettingRow_BuyoutOnly",
+        label = "Buyout Only (Exclude Bid-Only Auctions)",
+        desc = "Ignore AH listings that only have a bid option and no buyout price.",
+        defaultVal = true,
+    },
+    {
+        key = "assumeCanDisenchant",
+        frameName = "PF_SettingRow_Disenchant",
+        label = "Include Disenchant Plays (Buy & DE / Craft & DE)",
+        desc = "Uncheck on non-enchanter characters to hide all disenchant plays.",
+        defaultVal = true,
+    },
+    {
+        key = "showCraftPlays",
+        frameName = "PF_SettingRow_Craft",
+        label = "Include Crafting Plays (Craft & AH / Craft & Vendor)",
+        desc = "Include profitable crafting plays from your professions.",
+        defaultVal = true,
+    },
+    {
+        key = "showVendorPlays",
+        frameName = "PF_SettingRow_Vendor",
+        label = "Include Direct Vendor Flips (Buy AH -> Sell to NPC)",
+        desc = "Include items listed on the AH below their NPC vendor sell price.",
+        defaultVal = true,
+    },
+    {
+        key = "includeTrainerRecommendations",
+        frameName = "PF_SettingRow_Trainer",
+        label = "Include Trainer / Vendor Recipe Recommendations (+25 Skill)",
+        desc = "Surface profitable recipes you can learn at a trainer or vendor.",
+        defaultVal = true,
+    },
+    {
+        key = "includeAllCharRecipes",
+        frameName = "PF_SettingRow_Alts",
+        label = "Include All Characters' Known Recipes (Alts)",
+        desc = "Use crafting recipes scanned across all characters on your account.",
+        defaultVal = false,
+    },
+    {
+        key = "useHistoricalSpikeGuard",
+        frameName = "PF_SettingRow_SpikeGuard",
+        label = "Historical Spike Protection (14-Day Median Cap)",
+        desc = "Cap spiked exit prices when MarketFeed 14-day history is present.",
+        defaultVal = true,
+    },
+}
 
 local function SetBackdropSafe(frame, bgR, bgG, bgB, bgA)
     if not frame then return end
@@ -262,6 +352,202 @@ function PF.SideWindow.TriggerAHScan()
     return false
 end
 
+local function GetSettingBool(key, defaultVal)
+    local s = Profitable_DB and Profitable_DB.settings
+    if not s or s[key] == nil then
+        return defaultVal == true
+    end
+    return s[key] == true
+end
+
+local function SetTagButtonVisual(btn, label, isEnabled)
+    if not btn then return end
+    if btn._pfBg then
+        if isEnabled then
+            if btn._pfBg.SetColorTexture then
+                btn._pfBg:SetColorTexture(0.08, 0.34, 0.22, 0.95)
+            elseif btn._pfBg.SetTexture then
+                btn._pfBg:SetTexture(0.08, 0.34, 0.22, 0.95)
+            end
+        else
+            if btn._pfBg.SetColorTexture then
+                btn._pfBg:SetColorTexture(0.14, 0.14, 0.16, 0.85)
+            elseif btn._pfBg.SetTexture then
+                btn._pfBg:SetTexture(0.14, 0.14, 0.16, 0.85)
+            end
+        end
+    end
+    local formatted = isEnabled
+        and string.format("|cff00ff88[%s]|r", label)
+        or string.format("|cff777777[%s]|r", label)
+    if btn.SetText then
+        btn:SetText(formatted)
+    end
+    if btn.labelText and btn.labelText.SetText then
+        btn.labelText:SetText(formatted)
+    end
+end
+
+function PF.SideWindow.RefreshFilterControls()
+    for _, tag in ipairs(FILTER_TAGS) do
+        local btn = filterTagButtons[tag.key]
+        if btn then
+            local enabled = GetSettingBool(tag.key, tag.defaultVal)
+            SetTagButtonVisual(btn, tag.label, enabled)
+        end
+    end
+    for _, opt in ipairs(SETTINGS_OPTIONS) do
+        local row = settingsCheckRows[opt.key]
+        if row then
+            local enabled = GetSettingBool(opt.key, opt.defaultVal)
+            local box = enabled and "|cff00ff88[ON]|r" or "|cff777777[OFF]|r"
+            local text = string.format("%s  %s", box, opt.label)
+            if row.SetText then row:SetText(text) end
+            if row.titleText and row.titleText.SetText then
+                row.titleText:SetText(text)
+            end
+            if row._pfBg then
+                local r, g, b = enabled and 0.10 or 0.12, enabled and 0.22 or 0.13, enabled and 0.16 or 0.15
+                if row._pfBg.SetColorTexture then
+                    row._pfBg:SetColorTexture(r, g, b, 0.92)
+                elseif row._pfBg.SetTexture then
+                    row._pfBg:SetTexture(r, g, b, 0.92)
+                end
+            end
+        end
+    end
+end
+
+function PF.SideWindow.ApplyFilterChange()
+    PF.SideWindow.RefreshFilterControls()
+    local status = (PF.GetAHDataStatus and PF.GetAHDataStatus()) or "FRESH"
+    if status == "FRESH" and not PF.AHVerifier.IsRunning() and PF.AHVerifier.RecalculateFromCache then
+        PF.AHVerifier.RecalculateFromCache()
+    end
+    if sideFrame and (not sideFrame.IsShown or sideFrame:IsShown()) then
+        PF.SideWindow.Refresh()
+    end
+    if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
+        PF.DetailWindow.RefreshIfShown()
+    end
+end
+
+function PF.SideWindow.ToggleSetting(key, defaultVal)
+    Profitable_DB = Profitable_DB or {}
+    Profitable_DB.settings = Profitable_DB.settings or {}
+    local cur = GetSettingBool(key, defaultVal)
+    Profitable_DB.settings[key] = not cur
+    PF.SideWindow.ApplyFilterChange()
+    return Profitable_DB.settings[key]
+end
+
+local function EnsureSettingsWindow()
+    if settingsFrame then
+        return settingsFrame
+    end
+
+    settingsFrame = CreateFrame("Frame", "PF_SettingsWindow", _G.UIParent)
+    if settingsFrame.SetSize then settingsFrame:SetSize(410, 385) end
+    if settingsFrame.SetPoint then settingsFrame:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 20) end
+    if settingsFrame.SetFrameStrata then settingsFrame:SetFrameStrata("DIALOG") end
+    if settingsFrame.SetMovable then settingsFrame:SetMovable(true) end
+    if settingsFrame.EnableMouse then settingsFrame:EnableMouse(true) end
+    if settingsFrame.RegisterForDrag then settingsFrame:RegisterForDrag("LeftButton") end
+    settingsFrame:SetScript("OnDragStart", function(self)
+        if self.StartMoving then self:StartMoving() end
+    end)
+    settingsFrame:SetScript("OnDragStop", function(self)
+        if self.StopMovingOrSizing then self:StopMovingOrSizing() end
+    end)
+
+    SetBackdropSafe(settingsFrame, 0.05, 0.06, 0.09, 0.97)
+
+    local title = settingsFrame.CreateFontString and settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    if title then
+        if title.SetPoint then title:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", 14, -12) end
+        if title.SetText then title:SetText("|cff00ff88Profitable|r — Filter & Play Options") end
+    end
+
+    local closeBtn = CreateFrame("Button", "PF_SettingsCloseButton", settingsFrame, "UIPanelCloseButton")
+    if closeBtn.SetPoint then closeBtn:SetPoint("TOPRIGHT", settingsFrame, "TOPRIGHT", -4, -4) end
+    closeBtn:SetScript("OnClick", function()
+        settingsFrame:Hide()
+    end)
+
+    local subtitle = settingsFrame.CreateFontString and settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    if subtitle then
+        if subtitle.SetPoint then subtitle:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", 14, -34) end
+        if subtitle.SetText then subtitle:SetText("Click any option below (or the tag bubbles on the Side Window) to filter plays:") end
+    end
+
+    for idx, opt in ipairs(SETTINGS_OPTIONS) do
+        local yOff = -56 - ((idx - 1) * 40)
+        local row = CreateFrame("Button", opt.frameName, settingsFrame)
+        if row.SetSize then row:SetSize(382, 36) end
+        if row.SetPoint then row:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", 14, yOff) end
+        SetBackdropSafe(row, 0.11, 0.13, 0.16, 0.92)
+
+        local titleText = row.CreateFontString and row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        if titleText then
+            if titleText.SetPoint then titleText:SetPoint("TOPLEFT", row, "TOPLEFT", 8, -4) end
+            if titleText.SetWidth then titleText:SetWidth(366) end
+            if titleText.SetJustifyH then titleText:SetJustifyH("LEFT") end
+        end
+
+        local descText = row.CreateFontString and row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        if descText then
+            if descText.SetPoint then descText:SetPoint("TOPLEFT", titleText, "BOTTOMLEFT", 0, -2) end
+            if descText.SetWidth then descText:SetWidth(366) end
+            if descText.SetJustifyH then descText:SetJustifyH("LEFT") end
+            if descText.SetText then descText:SetText("|cffaaaaaa" .. opt.desc .. "|r") end
+        end
+
+        row:SetScript("OnClick", function()
+            PF.SideWindow.ToggleSetting(opt.key, opt.defaultVal)
+        end)
+
+        row.titleText = titleText
+        row.descText = descText
+        settingsCheckRows[opt.key] = row
+    end
+
+    local resetBtn = CreateFrame("Button", "PF_SettingsResetButton", settingsFrame, "UIPanelButtonTemplate")
+    if resetBtn.SetSize then resetBtn:SetSize(160, 24) end
+    if resetBtn.SetPoint then resetBtn:SetPoint("BOTTOMLEFT", settingsFrame, "BOTTOMLEFT", 14, 12) end
+    if resetBtn.SetText then resetBtn:SetText("Reset Filter Defaults") end
+    resetBtn:SetScript("OnClick", function()
+        Profitable_DB = Profitable_DB or {}
+        Profitable_DB.settings = Profitable_DB.settings or {}
+        for _, opt in ipairs(SETTINGS_OPTIONS) do
+            Profitable_DB.settings[opt.key] = opt.defaultVal
+        end
+        PF.SideWindow.ApplyFilterChange()
+    end)
+
+    local doneBtn = CreateFrame("Button", "PF_SettingsDoneButton", settingsFrame, "UIPanelButtonTemplate")
+    if doneBtn.SetSize then doneBtn:SetSize(110, 24) end
+    if doneBtn.SetPoint then doneBtn:SetPoint("BOTTOMRIGHT", settingsFrame, "BOTTOMRIGHT", -14, 12) end
+    if doneBtn.SetText then doneBtn:SetText("Done") end
+    doneBtn:SetScript("OnClick", function()
+        settingsFrame:Hide()
+    end)
+
+    settingsFrame:Hide()
+    PF.SideWindow.settingsFrame = settingsFrame
+    PF.SideWindow.RefreshFilterControls()
+    return settingsFrame
+end
+
+function PF.SideWindow.ToggleSettingsWindow()
+    local frame = EnsureSettingsWindow()
+    if frame.IsShown and frame:IsShown() then
+        frame:Hide()
+    else
+        PF.SideWindow.RefreshFilterControls()
+        frame:Show()
+    end
+end
+
 local function EnsureSideWindow()
     if sideFrame then
         AnchorToAuctionHouse()
@@ -269,7 +555,7 @@ local function EnsureSideWindow()
     end
 
     sideFrame = CreateFrame("Frame", "PF_AuctionSideWindow", _G.UIParent)
-    if sideFrame.SetSize then sideFrame:SetSize(360, 505) end
+    if sideFrame.SetSize then sideFrame:SetSize(360, 530) end
     if sideFrame.SetPoint then sideFrame:SetPoint("TOPLEFT", _G.UIParent, "TOPLEFT", 850, -100) end
     if sideFrame.SetFrameStrata then sideFrame:SetFrameStrata("HIGH") end
     if sideFrame.SetMovable then sideFrame:SetMovable(true) end
@@ -295,6 +581,24 @@ local function EnsureSideWindow()
     if closeBtn.SetPoint then closeBtn:SetPoint("TOPRIGHT", sideFrame, "TOPRIGHT", -2, -2) end
     closeBtn:SetScript("OnClick", function()
         sideFrame:Hide()
+    end)
+
+    local settingsBtn = CreateFrame("Button", "PF_SideWindowSettingsButton", sideFrame, "UIPanelButtonTemplate")
+    if settingsBtn.SetSize then settingsBtn:SetSize(64, 20) end
+    if settingsBtn.SetPoint then settingsBtn:SetPoint("TOPRIGHT", sideFrame, "TOPRIGHT", -30, -7) end
+    if settingsBtn.SetText then settingsBtn:SetText("Options") end
+    settingsBtn:SetScript("OnClick", function()
+        PF.SideWindow.ToggleSettingsWindow()
+    end)
+    settingsBtn:SetScript("OnEnter", function(self)
+        if not _G.GameTooltip then return end
+        _G.GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        _G.GameTooltip:AddLine("Profitable Filter & Play Options", 0, 1, 0.5)
+        _G.GameTooltip:AddLine("Open the settings panel to configure Buyout-Only filtering, Disenchant/Craft/Vendor play toggles, and Trainer/Alt recipe options.", 1, 1, 1, true)
+        _G.GameTooltip:Show()
+    end)
+    settingsBtn:SetScript("OnLeave", function()
+        if _G.GameTooltip then _G.GameTooltip:Hide() end
     end)
 
     -- Gold & Known Recipes info line
@@ -337,7 +641,7 @@ local function EnsureSideWindow()
             _G.GameTooltip:AddLine("Shift-Click: Force live AH verification using existing candidates.", 0.7, 0.85, 1, true)
         else
             _G.GameTooltip:AddLine("Find Top 5 Plays", 0, 1, 0.5)
-            _G.GameTooltip:AddLine("Click: Calculate plays using fresh MarketFeed (<2h) and cached AH data.", 1, 1, 1, true)
+            _G.GameTooltip:AddLine("Click: Calculate and verify the Top 5 plays on the live Auction House.", 1, 1, 1, true)
             _G.GameTooltip:AddLine("Shift-Click: Force live AH verification queries for all candidates.", 0.7, 0.85, 1, true)
         end
         _G.GameTooltip:Show()
@@ -367,40 +671,77 @@ local function EnsureSideWindow()
         if statusText.SetText then statusText:SetText("Ready") end
     end
 
+    -- Quick-Toggle Filter Tag Bubbles Bar ([Disenchant] [Craft] [Vendor] [Buyout Only])
+    for idx, tag in ipairs(FILTER_TAGS) do
+        local xOff = 12 + ((idx - 1) * 85)
+        local pill = CreateFrame("Button", tag.frameName, sideFrame)
+        if pill.SetSize then pill:SetSize(81, 20) end
+        if pill.SetPoint then pill:SetPoint("TOPLEFT", sideFrame, "TOPLEFT", xOff, -80) end
+        SetBackdropSafe(pill, 0.08, 0.34, 0.22, 0.95)
+
+        local labelText = pill.CreateFontString and pill:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        if labelText then
+            if labelText.SetPoint then labelText:SetPoint("CENTER", pill, "CENTER", 0, 0) end
+        end
+        pill.labelText = labelText
+
+        pill:SetScript("OnClick", function()
+            PF.SideWindow.ToggleSetting(tag.key, tag.defaultVal)
+        end)
+        pill:SetScript("OnEnter", function(self)
+            if not _G.GameTooltip then return end
+            local enabled = GetSettingBool(tag.key, tag.defaultVal)
+            _G.GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            _G.GameTooltip:AddLine(tag.tooltipTitle, 0, 1, 0.5)
+            _G.GameTooltip:AddLine(tag.tooltipDesc, 1, 1, 1, true)
+            _G.GameTooltip:AddLine(" ")
+            _G.GameTooltip:AddLine(string.format("Current: %s — |cff00ff88Click to toggle|r", enabled and "|cff00ff00ON|r" or "|cffff5555OFF|r"), 0.8, 0.8, 0.8)
+            _G.GameTooltip:Show()
+        end)
+        pill:SetScript("OnLeave", function()
+            if _G.GameTooltip then _G.GameTooltip:Hide() end
+        end)
+
+        filterTagButtons[tag.key] = pill
+    end
+
     local subBanner = sideFrame.CreateFontString and sideFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     if subBanner then
-        if subBanner.SetPoint then subBanner:SetPoint("TOPLEFT", sideFrame, "TOPLEFT", 12, -82) end
+        if subBanner.SetPoint then subBanner:SetPoint("TOPLEFT", sideFrame, "TOPLEFT", 12, -106) end
         if subBanner.SetText then subBanner:SetText("Top 5 Plays (1 per end-result market — click to expand):") end
     end
 
     for i = 1, TOP_ROWS do
-        local yOff = -102 - ((i - 1) * 50)
+        local yOff = -126 - ((i - 1) * 50)
         playButtons[i] = CreateOpportunityButton(sideFrame, "PF_SideWindowPlayButton" .. i, yOff, 0.11, 0.13, 0.16)
     end
 
     -- Honorable Mentions Section Header
     local hmHeader = sideFrame.CreateFontString and sideFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     if hmHeader then
-        if hmHeader.SetPoint then hmHeader:SetPoint("TOPLEFT", sideFrame, "TOPLEFT", 12, -360) end
+        if hmHeader.SetPoint then hmHeader:SetPoint("TOPLEFT", sideFrame, "TOPLEFT", 12, -384) end
         if hmHeader.SetText then
             hmHeader:SetText("|cffffd100Honorable Mentions (Best Craft & Vendor Plays):|r")
         end
     end
 
     for i = 1, HM_ROWS do
-        local yOff = -380 - ((i - 1) * 50)
+        local yOff = -404 - ((i - 1) * 50)
         hmButtons[i] = CreateOpportunityButton(sideFrame, "PF_SideWindowHMButton" .. i, yOff, 0.13, 0.11, 0.15)
     end
 
     sideFrame.infoText = infoText
     sideFrame.findBtn = findBtn
+    sideFrame.settingsBtn = settingsBtn
     sideFrame.statusBar = statusBar
     sideFrame.statusText = statusText
     sideFrame.subBanner = subBanner
     sideFrame.playButtons = playButtons
     sideFrame.hmHeader = hmHeader
     sideFrame.hmButtons = hmButtons
+    sideFrame.filterTagButtons = filterTagButtons
 
+    PF.SideWindow.RefreshFilterControls()
     AnchorToAuctionHouse()
     PF.SideWindow.frame = sideFrame
     return sideFrame
@@ -604,6 +945,7 @@ end
 function PF.SideWindow.Refresh()
     local frame = EnsureSideWindow()
     HookPCFScanButtonIfAvailable()
+    PF.SideWindow.RefreshFilterControls()
 
     if PF.AHVerifier.IsRunning() then
         if frame.findBtn then frame.findBtn:SetText("Accept Top 5 / Stop") end

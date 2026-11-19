@@ -87,16 +87,34 @@ local function RegisterSlashCommands()
             end
         elseif cmd == "de" then
             Profitable_DB.settings.assumeCanDisenchant = not Profitable_DB.settings.assumeCanDisenchant
-            print(string.format("|cff00ff88[Profitable]|r Assume Can Disenchant: %s", Profitable_DB.settings.assumeCanDisenchant and "ON" or "OFF"))
+            if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
+                PF.SideWindow.ApplyFilterChange()
+            end
+            print(string.format("|cff00ff88[Profitable]|r Disenchant Plays: %s", Profitable_DB.settings.assumeCanDisenchant and "ON" or "OFF"))
         elseif cmd == "alts" then
             Profitable_DB.settings.includeAllCharRecipes = not Profitable_DB.settings.includeAllCharRecipes
+            if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
+                PF.SideWindow.ApplyFilterChange()
+            end
             print(string.format("|cff00ff88[Profitable]|r Include All Characters' Recipes: %s", Profitable_DB.settings.includeAllCharRecipes and "ON" or "OFF"))
+        elseif cmd == "buyout" or cmd == "buyoutonly" then
+            Profitable_DB.settings.buyoutOnly = not (Profitable_DB.settings.buyoutOnly ~= false)
+            if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
+                PF.SideWindow.ApplyFilterChange()
+            end
+            print(string.format("|cff00ff88[Profitable]|r Buyout Only (Exclude Bid-Only Auctions): %s", Profitable_DB.settings.buyoutOnly and "ON" or "OFF"))
+        elseif cmd == "options" or cmd == "settings" or cmd == "config" then
+            if PF.SideWindow and PF.SideWindow.ToggleSettingsWindow then
+                PF.SideWindow.ToggleSettingsWindow()
+            end
         else
             print("|cff00ff88Profitable Commands:|r")
             print("  /pf          - Toggle the Profitable AH side window")
             print("  /pf run      - Calculate and verify the Top 5 profitable plays")
             print("  /pf scan     - Start an AH price scan (when at the AH) or calculate plays")
             print("  /pf detail N - Open the breakdown & shopping tracker for play #1-#5")
+            print("  /pf options  - Open the Profitable Filter & Play Options window")
+            print("  /pf buyout   - Toggle Buyout-Only mode (excludes bid-only auctions; Default: ON)")
             print("  /pf de       - Toggle Disenchant plays on or off (Default: ON)")
             print("  /pf alts     - Toggle using known recipes across all alts vs current character")
             print("  /pf welcome  - Re-open the Getting Started / AH Scan guide popup")
