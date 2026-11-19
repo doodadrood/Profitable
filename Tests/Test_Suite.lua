@@ -809,6 +809,117 @@ do
     Assert(_G.PCF_DB == standalonePCFDB and _G.Profitable_DB.embeddedPCF == nil, "Profitable uses standalone PCF_DB instead of creating embeddedPCF when standalone PCF is active")
     Assert(_G.PCF_DB.settings.showScanButton == true and updateVisCalls == 1, "Profitable enables scan button on standalone PCF when userSetScanButton is false")
 
+    -- 19. Onboarding Popup, Missing AH Data Prompt, Stale (>24h) AH Data Guard & 1-Click AH Scan
+    -- 19A. First-run Onboarding Popup appears until user clicks Accept / OK
+    ResetRuntimeGlobals()
+    _G.Auctionator = nil
+    _G.TSM_API = nil
+    _G.C_AddOns = { IsAddOnLoaded = function() return false end }
+    _G.IsAddOnLoaded = _G.C_AddOns.IsAddOnLoaded
+
+    local tocShared19 = LoadProfitableTOC(nil)
+    tocShared19.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+    _G.PF.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+
+    local popup1 = _G.PF_OnboardingPopup
+    Assert(popup1 ~= nil and popup1:IsShown() == true, "Onboarding popup automatically displays on first run before user accepts")
+    Assert(_G.Profitable_DB.settings.onboardingDismissed == false, "onboardingDismissed remains false before clicking OK")
+
+    -- Closing via X button hides for session but still pops up on next run
+    _G.PF_OnboardingCloseButton:Click()
+    Assert(popup1:IsShown() == false and _G.Profitable_DB.settings.onboardingDismissed == false, "Close button hides popup for session without marking onboardingDismissed")
+
+    local savedUnacceptedDB = _G.Profitable_DB
+    ResetRuntimeGlobals()
+    local tocShared19Reload1 = LoadProfitableTOC(savedUnacceptedDB)
+    tocShared19Reload1.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+    _G.PF.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+    Assert(_G.PF_OnboardingPopup ~= nil and _G.PF_OnboardingPopup:IsShown() == true, "Onboarding popup appears again on next run when user has not clicked OK/Accept")
+
+    -- Clicking 'OK, Got It!' sets onboardingDismissed = true and suppresses startup popup on subsequent runs
+    _G.PF_OnboardingAcceptButton:Click()
+    Assert(_G.PF_OnboardingPopup:IsShown() == false and _G.Profitable_DB.settings.onboardingDismissed == true, "Clicking Accept/OK hides popup and persists onboardingDismissed = true")
+
+    local savedAcceptedDB = _G.Profitable_DB
+    ResetRuntimeGlobals()
+    local tocShared19Reload2 = LoadProfitableTOC(savedAcceptedDB)
+    tocShared19Reload2.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+    _G.PF.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+    Assert(_G.PF_OnboardingPopup == nil or _G.PF_OnboardingPopup:IsShown() == false, "Onboarding popup does not auto-open once user has confirmed/accepted it")
+
+    -- /pf welcome re-opens the popup on demand even after dismissal
+    _G.SlashCmdList["PROFITABLE"]("welcome")
+    Assert(_G.PF_OnboardingPopup ~= nil and _G.PF_OnboardingPopup:IsShown() == true, "/pf welcome opens the onboarding guide popup on demand")
+    _G.PF_OnboardingPopup:Hide()
+
+    -- 19B. Missing AH Data ("NO_DATA") at Auction House hides old plays and directs user to scan
+    local statusNoData, infoNoData = _G.PF.GetAHDataStatus()
+    Assert(statusNoData == "NO_DATA" and infoNoData.itemCount == 0, "GetAHDataStatus reports NO_DATA when PCF_DB.prices is empty")
+
+    -- Seed fake leftover plays in lastTopPlays to verify they are NOT displayed when AH data is missing
+    _G.Profitable_DB.lastTopPlays = {
+        { id = "VENDOR:2447", itemId = 2447, itemName = "Peacebloom", itemLink = "[Peacebloom]", actionLabel = "Vendor", quantity = 10, totalCost = 100, totalProfit = 200, roiPercent = 200 },
+        { id = "VENDOR:2840", itemId = 2840, itemName = "Copper Bar", itemLink = "[Copper Bar]", actionLabel = "Vendor", quantity = 5, totalCost = 100, totalProfit = 150, roiPercent = 150 },
+    }
+    _G.Profitable_DB.lastHonorableMentions = {
+        { id = "CRAFT_VENDOR:2846", itemId = 2846, itemName = "Copper Chain Pants", itemLink = "[Copper Chain Pants]", actionLabel = "Craft and Vendor", hmCategory = "Top Vendor", quantity = 1, totalCost = 50, totalProfit = 50, roiPercent = 100 },
+    }
+
+    _G.AuctionHouseFrame:Show()
+    _G.PCF.Scanner.frame:Trigger("AUCTION_HOUSE_SHOW")
+    _G.PF.SideWindow.eventFrame:Trigger("AUCTION_HOUSE_SHOW")
+
+    Assert(_G.PF_FindOpportunitiesButton:GetText() == "Scan AH Now", "SideWindow primary button reads 'Scan AH Now' at AH when no AH data exists")
+    Assert(_G.PF_SideWindowPlayButton1:IsShown() == true and _G.PF_SideWindowPlayButton1.mainText:GetText():find("No Auction House Data Found") ~= nil, "Row 1 directs user to scan AH when no data exists")
+    Assert(_G.PF_SideWindowPlayButton2:IsShown() == false and _G.PF_SideWindowHMButton1:IsShown() == false, "Old cached plays and Honorable Mentions are hidden when no AH data exists")
+
+    -- Running /pf run with NO_DATA refuses to calculate stale plays and clears lastTopPlays
+    local noDataPlays = _G.PF.SideWindow.RunSearch()
+    Assert(#noDataPlays == 0 and #_G.Profitable_DB.lastTopPlays == 0, "RunSearch returns empty and clears lastTopPlays when NO_DATA")
+
+    -- Clicking 'Scan AH Now' in Profitable directly starts the PCF AH scan
+    local pcfScanTriggered = 0
+    local origStartScan = _G.PCF.Scanner.StartScan
+    _G.PCF.Scanner.StartScan = function(...)
+        pcfScanTriggered = pcfScanTriggered + 1
+        if _G.PCF.Scanner.scanButton then
+            _G.PCF.Scanner.scanButton:SetText("Stop Scan")
+        end
+    end
+    _G.PF_FindOpportunitiesButton:Click()
+    Assert(pcfScanTriggered == 1, "Clicking 'Scan AH Now' in Profitable triggers PCF.Scanner.StartScan()")
+    Assert(_G.PF_FindOpportunitiesButton:GetText() == "Scanning AH...", "Profitable button updates to 'Scanning AH...' while PCF scan runs")
+    _G.PCF.Scanner.StartScan = origStartScan
+
+    -- 19C. Very Stale AH Data ("STALE", >24h old) hides old plays and directs user to rescan
+    local threeDaysAgo = math.floor(Mock.currentTime) - (3 * 86400)
+    _G.PCF_DB.lastFullScan = threeDaysAgo
+    _G.PCF_DB.prices[2447] = { minBuyout = 5, minBid = 5, count = 20, lastUpdated = threeDaysAgo, source = "Scan" }
+    _G.Profitable_DB.lastTopPlays = {
+        { id = "VENDOR:2447", itemId = 2447, itemName = "Peacebloom", itemLink = "[Peacebloom]", actionLabel = "Vendor", quantity = 20, totalCost = 100, totalProfit = 100, roiPercent = 100 },
+        { id = "VENDOR:2840", itemId = 2840, itemName = "Copper Bar", itemLink = "[Copper Bar]", actionLabel = "Vendor", quantity = 5, totalCost = 100, totalProfit = 150, roiPercent = 150 },
+    }
+    if _G.PCF.Scanner.scanButton then
+        _G.PCF.Scanner.scanButton:SetText("PCF Scan")
+    end
+
+    local statusStale, infoStale = _G.PF.GetAHDataStatus()
+    Assert(statusStale == "STALE" and infoStale.ageText == "3d 0h", "GetAHDataStatus reports STALE (3d 0h) when last scan is >24h old")
+
+    _G.PF.SideWindow.Refresh()
+    Assert(_G.PF_FindOpportunitiesButton:GetText() == "Scan AH Now", "SideWindow primary button reads 'Scan AH Now' when AH data is stale")
+    Assert(_G.PF_SideWindowPlayButton1.mainText:GetText():find("AH Data is Stale %(3d 0h old%)") ~= nil, "Row 1 warns that AH data is stale and old plays are hidden")
+    Assert(_G.PF_SideWindowPlayButton2:IsShown() == false, "Row 2+ old plays are hidden when AH data is stale")
+
+    -- Simulate PCF scan completing with fresh timestamp -> SideWindow automatically transitions to 'Find Top 5 Plays'
+    _G.PCF_DB.lastFullScan = math.floor(Mock.currentTime)
+    _G.PCF_DB.prices[2447].lastUpdated = math.floor(Mock.currentTime)
+    if _G.PCF.Scanner.scanButton then
+        _G.PCF.Scanner.scanButton:SetText("PCF Scan")
+    end
+    local statusFresh = _G.PF.GetAHDataStatus()
+    Assert(statusFresh == "FRESH" and _G.PF_FindOpportunitiesButton:GetText() == "Find Top 5 Plays", "SideWindow automatically switches to 'Find Top 5 Plays' as soon as PCF scan completes")
+
     -- Restore outer test environment
     _G.C_AddOns = origCAddOns
     _G.IsAddOnLoaded = origIsAddOnLoaded

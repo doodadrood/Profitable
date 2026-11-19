@@ -54,6 +54,8 @@ local defaultConfig = {
         mirrorFeedToPCF = true,                  -- Softly fill missing/older PCF_DB prices from MarketFeed when both are active
         marketFeedVerifySkipSeconds = 7200,      -- Skip live AH query if MarketFeed order book is fresher than 2h (Shift-click forces live)
         showSideWindow = true,
+        onboardingDismissed = false,             -- Show welcome/AH-scan popup on startup until user clicks OK / Got It
+        staleDataThresholdSeconds = 86400,       -- Require a fresh AH scan when cached data is older than 24 hours
     },
     charRecipes = {},     -- [charKey] = { [recipeKey] = recipeTable }
     vendorBuyPrices = {}, -- [itemId] = copperPrice (learned dynamically from vendors + static DB)
@@ -98,6 +100,117 @@ function PF.GetEffectiveAHCutRate()
         return configured
     end
     return 0.05
+end
+
+function PF.FormatAgeShort(ageSeconds)
+    if type(ageSeconds) ~= "number" or ageSeconds < 0 or ageSeconds >= math.huge then
+        return "never"
+    end
+    local secs = math.floor(ageSeconds)
+    if secs >= 86400 then
+        local d = math.floor(secs / 86400)
+        local h = math.floor((secs % 86400) / 3600)
+        return string.format("%dd %dh", d, h)
+    elseif secs >= 3600 then
+        local h = math.floor(secs / 3600)
+        local m = math.floor((secs % 3600) / 60)
+        return string.format("%dh %dm", h, m)
+    elseif secs >= 60 then
+        return string.format("%dm", math.floor(secs / 60))
+    end
+    return "0m"
+end
+
+-- Evaluates whether Auction House price data is available and fresh.
+-- Returns: status ("NO_DATA" | "STALE" | "FRESH"), detailsTable
+function PF.GetAHDataStatus()
+    local now = (_G.time and _G.time()) or 0
+    local threshold = (Profitable_DB and Profitable_DB.settings and tonumber(Profitable_DB.settings.staleDataThresholdSeconds)) or 86400
+
+    local pcfItems = 0
+    local newestEntryTs = 0
+    local hasUntimestampedEntry = false
+
+    if _G.PCF_DB and type(_G.PCF_DB.prices) == "table" then
+        for itemId, entry in pairs(_G.PCF_DB.prices) do
+            if type(itemId) == "number" and itemId > 0 and type(entry) == "table" and entry.minBuyout and entry.minBuyout > 0 then
+                pcfItems = pcfItems + 1
+                local ts = tonumber(entry.lastUpdated) or 0
+                if ts > newestEntryTs then
+                    newestEntryTs = ts
+                elseif ts <= 0 then
+                    hasUntimestampedEntry = true
+                end
+            end
+        end
+    end
+
+    local lastScanTs = 0
+    if _G.PCF_DB then
+        local fullTs = tonumber(_G.PCF_DB.lastFullScan) or 0
+        local repTs = tonumber(_G.PCF_DB.lastReplicateScan) or 0
+        lastScanTs = math.max(fullTs, repTs)
+    end
+
+    local feedItems = 0
+    local feedTs = 0
+    if PF.MarketFeed and PF.MarketFeed.GetFeedTable then
+        local feed = PF.MarketFeed.GetFeedTable()
+        if feed and type(feed.items) == "table" then
+            feedTs = tonumber(feed.timestamp) or 0
+            for itemId, row in pairs(feed.items) do
+                if type(itemId) == "number" and itemId > 0 and type(row) == "table" and row.m and row.m > 0 then
+                    feedItems = feedItems + 1
+                end
+            end
+        end
+    end
+
+    local totalItems = math.max(pcfItems, feedItems)
+    local effectivePCFTs = 0
+    if pcfItems > 0 then
+        effectivePCFTs = (lastScanTs > 0) and lastScanTs or newestEntryTs
+    end
+    local effectiveFeedTs = (feedItems > 0) and feedTs or 0
+    local bestTs = math.max(effectivePCFTs, effectiveFeedTs)
+
+    if totalItems <= 0 then
+        return "NO_DATA", {
+            status = "NO_DATA",
+            itemCount = 0,
+            pcfItems = 0,
+            feedItems = 0,
+            lastScanTimestamp = 0,
+            ageSeconds = nil,
+            ageText = "never",
+        }
+    end
+
+    if bestTs <= 0 and hasUntimestampedEntry then
+        return "FRESH", {
+            status = "FRESH",
+            itemCount = totalItems,
+            pcfItems = pcfItems,
+            feedItems = feedItems,
+            lastScanTimestamp = now,
+            ageSeconds = 0,
+            ageText = "0m",
+        }
+    end
+
+    local ageSeconds = math.max(0, now - bestTs)
+    local ageText = PF.FormatAgeShort(ageSeconds)
+    local status = (ageSeconds > threshold) and "STALE" or "FRESH"
+
+    return status, {
+        status = status,
+        itemCount = totalItems,
+        pcfItems = pcfItems,
+        feedItems = feedItems,
+        lastScanTimestamp = bestTs,
+        ageSeconds = ageSeconds,
+        ageText = ageText,
+    }
 end
 
 function PF.LoadConfig(customDB)

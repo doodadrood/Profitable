@@ -47,17 +47,43 @@ local function RegisterSlashCommands()
     SlashCmdList["PROFITABLE"] = function(msg)
         local cmd, arg = (msg or ""):lower():match("^%s*(%S*)%s*(.-)%s*$")
         if cmd == "" or cmd == "toggle" or cmd == "show" then
-            PF.SideWindow.Toggle()
-        elseif cmd == "run" or cmd == "scan" or cmd == "find" then
-            local plays = PF.SideWindow.RunSearch()
-            print(string.format("|cff00ff88[Profitable]|r Found %d profitable plays:", #(plays or {})))
-            for i, opp in ipairs(plays or {}) do
-                print("  " .. (opp.summaryLine or PF.OpportunityEngine.FormatOpportunityLine(i, opp)))
+            if not (Profitable_DB and Profitable_DB.settings and Profitable_DB.settings.onboardingDismissed == true) then
+                PF.SideWindow.ShowOnboardingPopup(false)
             end
+            PF.SideWindow.Toggle()
+        elseif cmd == "scan" then
+            local status = (PF.GetAHDataStatus and PF.GetAHDataStatus()) or "FRESH"
+            local ahOpen = PF.AHVerifier and PF.AHVerifier.IsAuctionHouseOpen and PF.AHVerifier.IsAuctionHouseOpen()
+            if (status == "NO_DATA" or status == "STALE") and ahOpen then
+                PF.SideWindow.TriggerAHScan()
+            else
+                local plays = PF.SideWindow.RunSearch()
+                if status == "FRESH" then
+                    print(string.format("|cff00ff88[Profitable]|r Found %d profitable plays:", #(plays or {})))
+                    for i, opp in ipairs(plays or {}) do
+                        print("  " .. (opp.summaryLine or PF.OpportunityEngine.FormatOpportunityLine(i, opp)))
+                    end
+                end
+            end
+        elseif cmd == "run" or cmd == "find" then
+            local status = (PF.GetAHDataStatus and PF.GetAHDataStatus()) or "FRESH"
+            local plays = PF.SideWindow.RunSearch()
+            if status == "FRESH" then
+                print(string.format("|cff00ff88[Profitable]|r Found %d profitable plays:", #(plays or {})))
+                for i, opp in ipairs(plays or {}) do
+                    print("  " .. (opp.summaryLine or PF.OpportunityEngine.FormatOpportunityLine(i, opp)))
+                end
+            end
+        elseif cmd == "welcome" or cmd == "guide" or cmd == "onboarding" then
+            PF.SideWindow.ShowOnboardingPopup(true)
         elseif cmd == "detail" or tonumber(cmd) then
             local idx = tonumber(cmd) or tonumber(arg) or 1
-            if not PF_API.ShowOpportunity(idx) then
-                print(string.format("|cffff5555[Profitable]|r Opportunity #%d not found. Run /pf scan first.", idx))
+            local status = (PF.GetAHDataStatus and PF.GetAHDataStatus()) or "FRESH"
+            if status == "NO_DATA" then
+                PF.SideWindow.ShowOnboardingPopup(false)
+                print("|cffffcc00[Profitable]|r No Auction House scan data found yet. Open the Auction House and click 'Scan AH Now' (or 'PCF Scan') first.")
+            elseif not PF_API.ShowOpportunity(idx) then
+                print(string.format("|cffff5555[Profitable]|r Opportunity #%d not found. Run /pf run first.", idx))
             end
         elseif cmd == "de" then
             Profitable_DB.settings.assumeCanDisenchant = not Profitable_DB.settings.assumeCanDisenchant
@@ -69,9 +95,11 @@ local function RegisterSlashCommands()
             print("|cff00ff88Profitable Commands:|r")
             print("  /pf          - Toggle the Profitable AH side window")
             print("  /pf run      - Calculate and verify the Top 5 profitable plays")
+            print("  /pf scan     - Start an AH price scan (when at the AH) or calculate plays")
             print("  /pf detail N - Open the breakdown & shopping tracker for play #1-#5")
             print("  /pf de       - Toggle Disenchant plays on or off (Default: ON)")
             print("  /pf alts     - Toggle using known recipes across all alts vs current character")
+            print("  /pf welcome  - Re-open the Getting Started / AH Scan guide popup")
         end
     end
 end
@@ -140,7 +168,24 @@ function PF.Initialize()
     end
 
     RegisterSlashCommands()
-    print("|cff00ff88Profitable loaded.|r Open the Auction House or type /pf to find the top 5 plays.")
+
+    local dataStatus, dataInfo = "FRESH", nil
+    if PF.GetAHDataStatus then
+        dataStatus, dataInfo = PF.GetAHDataStatus()
+    end
+
+    if not (Profitable_DB and Profitable_DB.settings and Profitable_DB.settings.onboardingDismissed == true) then
+        if PF.SideWindow and PF.SideWindow.ShowOnboardingPopup then
+            PF.SideWindow.ShowOnboardingPopup(false)
+        end
+        print("|cffffcc00[Profitable]|r Welcome! Profitable will not function until it has Auction House price data. Visit an Auctioneer, open the AH, and click 'Scan AH Now' (or 'PCF Scan').")
+    elseif dataStatus == "NO_DATA" then
+        print("|cffffcc00[Profitable]|r Loaded (no Auction House scan data found yet — open the AH and click 'Scan AH Now' or 'PCF Scan' before calculating plays).")
+    elseif dataStatus == "STALE" then
+        print(string.format("|cffff9900[Profitable]|r Loaded (Auction House data is %s old — open the AH and run a fresh scan for accurate plays).", (dataInfo and dataInfo.ageText) or "24h+"))
+    else
+        print("|cff00ff88Profitable loaded.|r Open the Auction House or type /pf to find the top 5 plays.")
+    end
     return true
 end
 
@@ -150,17 +195,22 @@ end
 
 local coreFrame = CreateFrame("Frame")
 coreFrame:RegisterEvent("ADDON_LOADED")
+if coreFrame.RegisterEvent then
+    pcall(coreFrame.RegisterEvent, coreFrame, "PLAYER_LOGIN")
+end
 
 coreFrame:SetScript("OnEvent", function(self, event, loadedAddon)
-    if loadedAddon ~= addonName and loadedAddon ~= "Profitable" then
+    if event == "ADDON_LOADED" and loadedAddon ~= addonName and loadedAddon ~= "Profitable" then
         return
     end
     if _G.PF_INITIALIZED then
         self:UnregisterEvent("ADDON_LOADED")
+        pcall(self.UnregisterEvent, self, "PLAYER_LOGIN")
         return
     end
     PF.Initialize()
     self:UnregisterEvent("ADDON_LOADED")
+    pcall(self.UnregisterEvent, self, "PLAYER_LOGIN")
 end)
 
 PF.coreFrame = coreFrame
