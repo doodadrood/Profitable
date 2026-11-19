@@ -1,5 +1,10 @@
 package-as: Profitable
 
+externals:
+  Libs/PriceCheckerForever:
+    url: https://github.com/doodadrood/PriceCheckerForever.git
+    tag: latest
+
 ignore:
   - Tests
   - Tools

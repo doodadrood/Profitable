@@ -1,5 +1,5 @@
-local addonName, PF = ...
-PF = (_G.PF_INITIALIZED and _G.PF) or (type(PF) == "table" and PF) or _G.PF or {}
+local addonName = ...
+local PF = _G.PF or {}
 _G.PF = PF
 _G.Profitable = PF
 
@@ -76,6 +76,45 @@ local function RegisterSlashCommands()
     end
 end
 
+local function IsStandalonePCFLoaded()
+    if PF._standalonePCFActive == true then
+        return true
+    end
+    local isLoadedFn = (_G.C_AddOns and _G.C_AddOns.IsAddOnLoaded) or _G.IsAddOnLoaded
+    if type(isLoadedFn) == "function" then
+        local ok, loaded = pcall(isLoadedFn, "PriceCheckerForever")
+        if ok and loaded then
+            return true
+        end
+    end
+    return false
+end
+
+local function ConfigureEmbeddedPCF()
+    if PF._embeddedPCFActive and not IsStandalonePCFLoaded() then
+        if not _G.PCF_INITIALIZED and _G.PCF and type(_G.PCF.Initialize) == "function" then
+            _G.PCF.Initialize()
+        end
+        Profitable_DB.embeddedPCF = (type(Profitable_DB.embeddedPCF) == "table" and Profitable_DB.embeddedPCF) or {}
+        if _G.PCF_API and type(_G.PCF_API.SetSavedVariables) == "function" then
+            _G.PCF_API.SetSavedVariables(Profitable_DB.embeddedPCF)
+        elseif _G.PCF and type(_G.PCF.LoadConfig) == "function" then
+            _G.PCF.LoadConfig(Profitable_DB.embeddedPCF)
+        end
+    end
+
+    -- Ensure PCF's AH scan button is active out of the box when Profitable is enabled
+    -- (unless the user explicitly toggled it off via /pcf button), even alongside TSM/Auctionator.
+    if _G.PCF_DB and type(_G.PCF_DB.settings) == "table" and not _G.PCF_DB.settings.userSetScanButton then
+        if _G.PCF_DB.settings.showScanButton ~= true then
+            _G.PCF_DB.settings.showScanButton = true
+            if _G.PCF and _G.PCF.Scanner and type(_G.PCF.Scanner.UpdateVisibility) == "function" then
+                _G.PCF.Scanner.UpdateVisibility()
+            end
+        end
+    end
+end
+
 function PF.Initialize()
     if _G.PF_INITIALIZED then
         return false
@@ -83,6 +122,7 @@ function PF.Initialize()
     _G.PF_INITIALIZED = true
 
     PF.LoadConfig()
+    ConfigureEmbeddedPCF()
     if PF.VendorDatabase and PF.VendorDatabase.Init then
         PF.VendorDatabase.Init()
     end

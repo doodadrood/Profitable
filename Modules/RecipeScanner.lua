@@ -1,6 +1,6 @@
-local _, PF = ...
-PF = type(PF) == "table" and PF or _G.PF or {}
+local PF = _G.PF or {}
 _G.PF = PF
+_G.Profitable = PF
 
 PF.RecipeScanner = {}
 

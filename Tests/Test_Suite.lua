@@ -654,4 +654,169 @@ do
     _G.AuctionHouseFrame.CommoditiesSellFrame = origCommSell
 end
 
+-- 18. Test Embedded PriceCheckerForever (Profitable.toc + Embed.xml), Out-of-the-Box Scan Button & Coexistence
+do
+    local function ResetRuntimeGlobals()
+        _G.PF = nil
+        _G.Profitable = nil
+        _G.PF_INITIALIZED = nil
+        _G.PF_API = nil
+        _G.Profitable_API = nil
+        _G.PCF = nil
+        _G.GPC = nil
+        _G.PCF_INITIALIZED = nil
+        _G.PCF_API = nil
+        _G.PCF_DB = nil
+        _G.GPC_DB = nil
+        _G.SlashCmdList["PROFITABLE"] = nil
+        _G.SlashCmdList["PRICECHECKERFOREVER"] = nil
+        _G.PCF_AuctionScanButton = nil
+        _G.PCF_AuctionScanStatusContainer = nil
+        _G.PCF_AuctionScanProgressBar = nil
+    end
+
+    local function LoadScriptFile(path, addonName, sharedTable)
+        local chunk, err = loadfile(path)
+        Assert(chunk ~= nil, "TOC/XML script loadable: " .. path .. (err and (" (" .. err .. ")") or ""))
+        chunk(addonName, sharedTable)
+    end
+
+    local function LoadProfitableTOC(savedProfitableDB)
+        _G.Profitable_DB = savedProfitableDB
+        local sharedAddonTable = {}
+        for line in io.lines("Profitable.toc") do
+            local trimmed = line:match("^%s*(.-)%s*$")
+            if trimmed ~= "" and not trimmed:match("^#") then
+                local normalized = trimmed:gsub("\\", "/")
+                if normalized:match("%.xml$") then
+                    local xmlDir = normalized:match("^(.*)/[^/]+$") or "."
+                    local xmlFile = io.open(normalized, "r")
+                    Assert(xmlFile ~= nil, "Embedded XML file exists: " .. normalized)
+                    local xmlText = xmlFile:read("*a")
+                    xmlFile:close()
+                    for scriptPath in xmlText:gmatch('<Script%s+file="(.-)"%s*/>') do
+                        local fullScript = xmlDir .. "/" .. scriptPath:gsub("\\", "/")
+                        LoadScriptFile(fullScript, "Profitable", sharedAddonTable)
+                    end
+                elseif normalized:match("%.lua$") then
+                    LoadScriptFile(normalized, "Profitable", sharedAddonTable)
+                end
+            end
+        end
+        return sharedAddonTable
+    end
+
+    local origCAddOns = _G.C_AddOns
+    local origIsAddOnLoaded = _G.IsAddOnLoaded
+    local origAuctionator = _G.Auctionator
+    local origTSMAPI = _G.TSM_API
+    local origChatInfo = _G.C_ChatInfo
+    local origAuctionFrame = _G.AuctionFrame
+    local origAuctionHouseFrame = _G.AuctionHouseFrame
+
+    _G.C_ChatInfo = {
+        RegisterAddonMessagePrefix = function() end,
+        SendAddonMessage = function() end,
+    }
+    _G.AuctionFrame = nil
+    _G.AuctionHouseFrame = _G.CreateFrame("Frame", "AuctionHouseFrame", _G.UIParent)
+
+    -- 18A. Fresh standalone Profitable with NO external AH addons and NO standalone PCF
+    ResetRuntimeGlobals()
+    _G.Auctionator = nil
+    _G.TSM_API = nil
+    _G.C_AddOns = { IsAddOnLoaded = function() return false end }
+    _G.IsAddOnLoaded = _G.C_AddOns.IsAddOnLoaded
+
+    local tocSharedA = LoadProfitableTOC(nil)
+    Assert(_G.PF ~= _G.PCF, "Profitable PF namespace stays isolated from embedded PCF table")
+    Assert(type(_G.PF.Formatter.FormatMoneyShort) == "function" and type(_G.PCF.Formatter.FormatRelativeAge) == "function", "Both PF.Formatter and embedded PCF.Formatter stay intact")
+    Assert(_G.PF.LoadConfig ~= _G.PCF.LoadConfig and _G.PF.Initialize ~= _G.PCF.Initialize, "Profitable LoadConfig/Initialize do not overwrite embedded PCF functions")
+
+    tocSharedA.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+    _G.PF.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+
+    Assert(_G.PCF_INITIALIZED == true and _G.PF_INITIALIZED == true, "Embedded PCF and Profitable both initialize on ADDON_LOADED")
+    Assert(_G.PCF_DB == _G.Profitable_DB.embeddedPCF, "Embedded PCF stores SavedVariables in Profitable_DB.embeddedPCF")
+    Assert(_G.PCF_DB.settings.showScanButton == true and _G.PCF_DB.settings.showTooltip == true, "Embedded PCF defaults showScanButton and showTooltip ON without /pcf reset")
+    Assert(_G.PCF_DB.settings.autoScanOnOpen == false and _G.PCF_DB.settings.preferReplicateScan == true, "Embedded PCF preserves autoScanOnOpen=false and preferReplicateScan=true defaults")
+    _G.PCF.Scanner.frame:Trigger("AUCTION_HOUSE_SHOW")
+    Assert(_G.PCF.Scanner.scanButton ~= nil and _G.PCF.Scanner.scanButton:IsShown() == true, "Embedded PCF creates and shows PCF_AuctionScanButton on AUCTION_HOUSE_SHOW")
+
+    -- 18B. Fresh standalone Profitable WITH Auctionator & TSM installed (previously hid scan button!)
+    ResetRuntimeGlobals()
+    _G.Auctionator = { API = { v1 = {} } }
+    _G.TSM_API = {}
+    _G.C_AddOns = { IsAddOnLoaded = function(name) return name == "Auctionator" or name == "TradeSkillMaster" end }
+    _G.IsAddOnLoaded = _G.C_AddOns.IsAddOnLoaded
+
+    local tocSharedB = LoadProfitableTOC(nil)
+    tocSharedB.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+    _G.PF.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+
+    Assert(_G.PCF_DB.settings.showScanButton == true and _G.PCF_DB.settings.userSetScanButton == false, "Profitable enables PCF scan button out of the box even when Auctionator/TSM are loaded")
+    Assert(_G.PCF_DB.settings.showTooltip == false, "Embedded PCF still suppresses duplicate PCF tooltip when Auctionator/TSM are loaded")
+    _G.PCF.Scanner.frame:Trigger("AUCTION_HOUSE_SHOW")
+    Assert(_G.PCF.Scanner.scanButton ~= nil and _G.PCF.Scanner.scanButton:IsShown() == true, "PCF Scan button displays immediately on AUCTION_HOUSE_SHOW alongside Auctionator/TSM without /pcf reset")
+
+    -- Simulate user scanning an item, toggling /pcf button OFF explicitly, and reloading
+    _G.PCF_DB.prices[2589] = { minBuyout = 45, minBid = 45, lastUpdated = 1700000000, count = 20, source = "Scan" }
+    _G.SlashCmdList["PRICECHECKERFOREVER"]("button")
+    Assert(_G.PCF_DB.settings.showScanButton == false and _G.PCF_DB.settings.userSetScanButton == true, "/pcf button toggles scan button OFF and records explicit user preference")
+
+    local persistedDB = _G.Profitable_DB
+    ResetRuntimeGlobals()
+    local tocSharedReload = LoadProfitableTOC(persistedDB)
+    tocSharedReload.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+    _G.PF.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+
+    Assert(_G.PCF_DB == persistedDB.embeddedPCF and _G.PCF_DB.prices[2589].minBuyout == 45, "Embedded PCF price cache survives /reload via Profitable_DB.embeddedPCF")
+    Assert(_G.PCF_DB.settings.showScanButton == false and _G.PCF_DB.settings.userSetScanButton == true, "Explicit /pcf button OFF preference is preserved across /reload")
+
+    -- 18C. Standalone PriceCheckerForever already initialized before Profitable loads
+    ResetRuntimeGlobals()
+    local updateVisCalls = 0
+    local standalonePCF = {
+        _isStandaloneSentinel = true,
+        Scanner = {
+            UpdateVisibility = function()
+                updateVisCalls = updateVisCalls + 1
+            end,
+        },
+    }
+    local standalonePCFDB = {
+        settings = { showScanButton = false, userSetScanButton = false },
+        prices = { [2589] = { minBuyout = 88, lastUpdated = 1700000100 } },
+    }
+    local standalonePCFAPI = {
+        _isStandaloneAPISentinel = true,
+        IsReady = function() return true end,
+    }
+    _G.PCF = standalonePCF
+    _G.GPC = standalonePCF
+    _G.PCF_DB = standalonePCFDB
+    _G.GPC_DB = standalonePCFDB
+    _G.PCF_API = standalonePCFAPI
+    _G.PCF_INITIALIZED = true
+    _G.C_AddOns = { IsAddOnLoaded = function(name) return name == "PriceCheckerForever" or name == "Auctionator" end }
+    _G.IsAddOnLoaded = _G.C_AddOns.IsAddOnLoaded
+
+    LoadProfitableTOC(nil)
+    _G.PF.coreFrame:Trigger("ADDON_LOADED", "Profitable")
+
+    Assert(_G.PCF == standalonePCF and _G.PCF._isStandaloneSentinel == true, "Embedded load preserves already-initialized standalone PCF namespace")
+    Assert(_G.PCF_API == standalonePCFAPI and _G.PCF_API._isStandaloneAPISentinel == true, "Embedded load preserves standalone PCF_API")
+    Assert(_G.PCF_DB == standalonePCFDB and _G.Profitable_DB.embeddedPCF == nil, "Profitable uses standalone PCF_DB instead of creating embeddedPCF when standalone PCF is active")
+    Assert(_G.PCF_DB.settings.showScanButton == true and updateVisCalls == 1, "Profitable enables scan button on standalone PCF when userSetScanButton is false")
+
+    -- Restore outer test environment
+    _G.C_AddOns = origCAddOns
+    _G.IsAddOnLoaded = origIsAddOnLoaded
+    _G.Auctionator = origAuctionator
+    _G.TSM_API = origTSMAPI
+    _G.C_ChatInfo = origChatInfo
+    _G.AuctionFrame = origAuctionFrame
+    _G.AuctionHouseFrame = origAuctionHouseFrame
+end
+
 print("\nAll Profitable test assertions passed successfully!")

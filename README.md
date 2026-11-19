@@ -1,6 +1,6 @@
 # Profitable (PF) — WoW: Forever Gold-Making Companion for PriceCheckerForever
 
-**Profitable** works in conjunction with [PriceCheckerForever (PCF)](https://github.com/doodadrood/PriceCheckerForever) to analyze local Auction House scan data, your character's current gold balance, known crafting recipes, NPC vendor reagent prices, and Classic/Forever disenchant tables to surface the **Top 5 most profitable plays** you can make right now.
+**Profitable** bundles [PriceCheckerForever (PCF)](https://github.com/doodadrood/PriceCheckerForever) out of the box (and cooperates cleanly if standalone PCF is also installed) to analyze local Auction House scan data, your character's current gold balance, known crafting recipes, NPC vendor reagent prices, and Classic/Forever disenchant tables to surface the **Top 5 most profitable plays** you can make right now.
 
 ## Features
 

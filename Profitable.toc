@@ -4,10 +4,12 @@
 ## Author: PCF Dev Team
 ## Version: 1.1.0
 ## SavedVariables: Profitable_DB
-## Dependencies: PriceCheckerForever
-## OptionalDeps: TradeSkillMaster, Auctionator
+## OptionalDeps: PriceCheckerForever, TradeSkillMaster, Auctionator
 ## X-Curse-Project-ID: 1810976
 
+Modules/PCFEmbedPre.lua
+Libs/PriceCheckerForever/Embed.xml
+Modules/PCFEmbedPost.lua
 Config.lua
 Utils/Formatter.lua
 Data/VendorDatabase.lua

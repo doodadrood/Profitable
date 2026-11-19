@@ -1,5 +1,4 @@
-local addonName, PF = ...
-PF = (_G.PF_INITIALIZED and _G.PF) or (type(PF) == "table" and PF) or _G.PF or {}
+local PF = _G.PF or {}
 _G.PF = PF
 _G.Profitable = PF
 
