@@ -140,7 +140,7 @@ local function ResolveReagentPlan(reagentList, customOrderBooks)
     local intermediateSteps = {}
     local allowIntermediate = not (Profitable_DB and Profitable_DB.settings and Profitable_DB.settings.useIntermediateCrafting == false)
 
-    local function AddExpandedReagent(itemId, count, name, link)
+    local function AddExpandedReagent(itemId, count, name, link, isDirect)
         local vendorBuy = PF.VendorDatabase.GetVendorBuyPrice(itemId)
         local ahUnit = PF.OpportunityEngine.ResolveAHPrice(itemId, link)
 
@@ -154,6 +154,9 @@ local function ResolveReagentPlan(reagentList, customOrderBooks)
         for _, existing in ipairs(expanded) do
             if existing.itemId == itemId and existing.source == source then
                 existing.countPerUnit = existing.countPerUnit + count
+                if isDirect then
+                    existing.directCountPerUnit = (existing.directCountPerUnit or 0) + count
+                end
                 return
             end
         end
@@ -165,6 +168,7 @@ local function ResolveReagentPlan(reagentList, customOrderBooks)
             name = resolvedName,
             link = PF.Formatter.BuildItemLink(itemId, resolvedName, meta and meta.quality, link),
             countPerUnit = count,
+            directCountPerUnit = isDirect and count or 0,
             source = source,
             vendorUnitPrice = (source == "Vendor") and vendorBuy or nil,
         })
@@ -176,7 +180,7 @@ local function ResolveReagentPlan(reagentList, customOrderBooks)
         local vendorBuy = PF.VendorDatabase.GetVendorBuyPrice(itemId)
 
         if vendorBuy and vendorBuy > 0 then
-            AddExpandedReagent(itemId, countNeeded, r.name, r.link)
+            AddExpandedReagent(itemId, countNeeded, r.name, r.link, true)
         else
             local directBook = PF.OpportunityEngine.GetOrderBook(itemId, customOrderBooks)
             local directUnitPrice = (#directBook > 0) and directBook[1].unitPrice or nil
@@ -185,6 +189,9 @@ local function ResolveReagentPlan(reagentList, customOrderBooks)
             if allowIntermediate and PF.RecipeScanner and PF.RecipeScanner.GetIntermediateRecipeForItem then
                 local interRecipe = PF.RecipeScanner.GetIntermediateRecipeForItem(itemId)
                 if interRecipe and interRecipe.reagents and #interRecipe.reagents > 0 then
+                    if PF.RecipeScanner.NormalizeRecipeProfession then
+                        PF.RecipeScanner.NormalizeRecipeProfession(interRecipe)
+                    end
                     local avgMade = (interRecipe.avgMade and interRecipe.avgMade > 0) and interRecipe.avgMade or 1
                     local subCost = 0
                     local subAvailable = true
@@ -203,27 +210,164 @@ local function ResolveReagentPlan(reagentList, customOrderBooks)
                     if craftUnitCost and (not directUnitPrice or craftUnitCost < directUnitPrice) then
                         usedIntermediate = true
                         local batchesPerCraft = countNeeded / avgMade
+                        local interMeta = PF.VendorDatabase.GetItemMetadata(itemId, r.link)
+                        local interOutputName = r.name or (interMeta and interMeta.name) or interRecipe.name or string.format("Item #%d", itemId)
+                        local interOutputLink = PF.Formatter.BuildItemLink(itemId, interOutputName, interMeta and interMeta.quality, r.link)
+                        local stepReagents = {}
+                        for _, subR in ipairs(interRecipe.reagents) do
+                            local subMeta = PF.VendorDatabase.GetItemMetadata(subR.itemId, subR.link)
+                            local subName = subR.name or (subMeta and subMeta.name) or string.format("Item #%d", subR.itemId)
+                            local rawCount = math.ceil(subR.count * batchesPerCraft)
+                            table.insert(stepReagents, {
+                                itemId = subR.itemId,
+                                name = subName,
+                                countPerBatch = subR.count or 1,
+                                countPerFinalUnit = rawCount,
+                            })
+                            AddExpandedReagent(subR.itemId, rawCount, subR.name, subR.link, false)
+                        end
                         table.insert(intermediateSteps, {
                             recipeName = interRecipe.name,
                             profession = interRecipe.profession,
+                            professionId = interRecipe.professionId,
+                            recipeId = interRecipe.recipeId,
+                            recipe = interRecipe,
                             outputItemId = itemId,
+                            outputName = interOutputName,
+                            outputLink = interOutputLink,
                             countPerUnit = countNeeded,
+                            avgMade = avgMade,
+                            reagents = stepReagents,
                         })
-                        for _, subR in ipairs(interRecipe.reagents) do
-                            local rawCount = math.ceil(subR.count * batchesPerCraft)
-                            AddExpandedReagent(subR.itemId, rawCount, subR.name, subR.link)
-                        end
                     end
                 end
             end
 
             if not usedIntermediate then
-                AddExpandedReagent(itemId, countNeeded, r.name, r.link)
+                AddExpandedReagent(itemId, countNeeded, r.name, r.link, true)
             end
         end
     end
 
     return expanded, intermediateSteps
+end
+
+-- Computes live inventory counts across BOTH intermediate crafted materials (e.g. Mithril Bar,
+-- Solid Grinding Stone) and raw shopping list items (e.g. Mithril Ore, Solid Stone).
+-- When the player already owns some or all of an intermediate material, the required quantity
+-- of its raw reagents automatically shrinks (or drops to 0 when fully satisfied!).
+function PF.OpportunityEngine.ComputeLiveInventoryState(opp)
+    if type(opp) ~= "table" then return end
+
+    local units = math.max(1, math.floor(tonumber(opp.quantity) or 1))
+    local steps = type(opp.intermediateSteps) == "table" and opp.intermediateSteps or {}
+    local neededFromStepsByItem = {}
+    local fedBySteps = {}
+    local satisfyingStepsByItem = {}
+
+    for _, step in ipairs(steps) do
+        if type(step) == "table" and step.outputItemId then
+            if not step.recipe and PF.RecipeScanner and PF.RecipeScanner.GetIntermediateRecipeForItem then
+                step.recipe = PF.RecipeScanner.GetIntermediateRecipeForItem(step.outputItemId)
+            end
+            if type(step.recipe) == "table" and PF.RecipeScanner and PF.RecipeScanner.NormalizeRecipeProfession then
+                PF.RecipeScanner.NormalizeRecipeProfession(step.recipe)
+                if step.recipe.profession then
+                    step.profession = step.recipe.profession
+                    step.professionId = step.recipe.professionId
+                end
+                step.recipeId = step.recipeId or step.recipe.recipeId
+                step.avgMade = step.avgMade or step.recipe.avgMade
+            end
+            local totalNeeded = math.max(1, math.floor(tonumber(step.totalQuantity) or ((step.countPerUnit or 1) * units)))
+            local avgMade = (type(step.avgMade) == "number" and step.avgMade > 0) and step.avgMade or 1
+            local inBags = PF.Formatter.GetInventoryCount(step.outputItemId, false)
+            local inBank = math.max(0, PF.Formatter.GetInventoryCount(step.outputItemId, true) - inBags)
+            local remToCraft = math.max(0, totalNeeded - inBags)
+            local remBatches = (remToCraft > 0) and math.ceil(remToCraft / avgMade) or 0
+
+            step.totalQuantity = totalNeeded
+            step.haveInBags = inBags
+            step.haveInBank = inBank
+            step.remainingToCraft = remToCraft
+            step.remainingBatches = remBatches
+
+            if not step.outputName or not step.outputLink then
+                local meta = PF.VendorDatabase.GetItemMetadata(step.outputItemId)
+                step.outputName = step.outputName or (meta and meta.name) or step.recipeName or string.format("Item #%d", step.outputItemId)
+                step.outputLink = step.outputLink or PF.Formatter.BuildItemLink(step.outputItemId, step.outputName, meta and meta.quality)
+            end
+
+            local stepReagents = step.reagents
+            if (type(stepReagents) ~= "table" or #stepReagents == 0) and type(step.recipe) == "table" and type(step.recipe.reagents) == "table" then
+                stepReagents = {}
+                for _, sr in ipairs(step.recipe.reagents) do
+                    table.insert(stepReagents, {
+                        itemId = sr.itemId,
+                        name = sr.name,
+                        countPerBatch = sr.count or 1,
+                    })
+                end
+                step.reagents = stepReagents
+            end
+
+            local maxBatchesFromBags = remBatches
+            if type(stepReagents) == "table" and #stepReagents > 0 then
+                for _, subR in ipairs(stepReagents) do
+                    if subR and subR.itemId then
+                        local perBatch = math.max(1, math.floor(tonumber(subR.countPerBatch or subR.count) or 1))
+                        fedBySteps[subR.itemId] = true
+                        neededFromStepsByItem[subR.itemId] = (neededFromStepsByItem[subR.itemId] or 0) + (remBatches * perBatch)
+                        if inBags > 0 then
+                            satisfyingStepsByItem[subR.itemId] = satisfyingStepsByItem[subR.itemId] or {}
+                            table.insert(satisfyingStepsByItem[subR.itemId], {
+                                outputItemId = step.outputItemId,
+                                outputName = step.outputName,
+                                haveInBags = inBags,
+                                totalQuantity = totalNeeded,
+                            })
+                        end
+                        if remBatches > 0 then
+                            local rawInBags = PF.Formatter.GetInventoryCount(subR.itemId, false)
+                            local canMakeBatches = math.floor(rawInBags / perBatch)
+                            if canMakeBatches < maxBatchesFromBags then
+                                maxBatchesFromBags = canMakeBatches
+                            end
+                        end
+                    end
+                end
+            else
+                maxBatchesFromBags = 0
+            end
+
+            step.matsReadyInBags = (remToCraft > 0 and maxBatchesFromBags >= remBatches)
+            step.craftableNow = (remToCraft > 0) and math.min(remToCraft, math.floor(maxBatchesFromBags * avgMade)) or 0
+        end
+    end
+
+    if type(opp.shoppingList) == "table" then
+        for _, item in ipairs(opp.shoppingList) do
+            if type(item) == "table" and item.itemId then
+                local liveInBags = PF.Formatter.GetInventoryCount(item.itemId, false)
+                local liveInBank = math.max(0, PF.Formatter.GetInventoryCount(item.itemId, true) - liveInBags)
+                local baseTotal = math.max(0, math.floor(tonumber(item.totalQuantity) or 0))
+                local effectiveNeeded = baseTotal
+
+                if fedBySteps[item.itemId] then
+                    local directQty = math.max(0, math.floor(tonumber(item.directQuantity) or 0))
+                    effectiveNeeded = directQty + (neededFromStepsByItem[item.itemId] or 0)
+                end
+
+                item.haveInBags = liveInBags
+                item.haveInBank = liveInBank
+                item.effectiveQuantity = effectiveNeeded
+                item.remainingToBuy = math.max(0, effectiveNeeded - liveInBags)
+                item.satisfiedByIntermediates = (effectiveNeeded < baseTotal)
+                item.fullySatisfiedByIntermediates = (effectiveNeeded == 0 and baseTotal > 0)
+                item.satisfyingSteps = satisfyingStepsByItem[item.itemId]
+            end
+        end
+    end
 end
 
 local function ComputeEndResultKey(candidate)
@@ -440,6 +584,7 @@ function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCoppe
             link = r.link,
             source = r.source,
             countPerUnit = r.countPerUnit,
+            directQuantity = (r.directCountPerUnit or 0) * units,
             totalQuantity = cur.totalQty,
             haveInBags = inBags,
             haveInBank = inBank,
@@ -452,13 +597,17 @@ function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCoppe
         })
     end
 
+    for _, step in ipairs(intermediateSteps) do
+        step.totalQuantity = (step.countPerUnit or 1) * units
+    end
+
     local actionLabel = ACTION_LABELS[candidate.actionType] or candidate.actionType
     local meta = PF.VendorDatabase.GetItemMetadata(candidate.itemId, candidate.itemLink)
     local itemName = candidate.itemName or (meta and meta.name) or string.format("Item #%d", candidate.itemId)
     local itemLink = PF.Formatter.BuildItemLink(candidate.itemId, itemName, meta and meta.quality, candidate.itemLink)
     local pm = candidate.deBreakdown and candidate.deBreakdown.primaryMat
 
-    return {
+    local opp = {
         id = string.format("%s:%d", tostring(candidate.actionType), candidate.itemId),
         endResultKey = ComputeEndResultKey(candidate),
         actionType = candidate.actionType,
@@ -493,6 +642,9 @@ function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCoppe
         spikeInfo = candidate.spikeInfo,
         verified = (candidate.verified == true),
     }
+
+    PF.OpportunityEngine.ComputeLiveInventoryState(opp)
+    return opp
 end
 
 -- Aggregates all BUY_DE items that disenchant into the same primary enchanting material
@@ -801,10 +953,11 @@ function PF.OpportunityEngine.BuildDetailedExplanation(opp)
             local profLabel = (type(step.profession) == "string" and step.profession ~= "" and step.profession ~= "Profession" and step.profession ~= "TradeSkill")
                 and (" (" .. step.profession .. ")")
                 or ""
+            local targetLabel = step.outputName or step.recipeName or "intermediate material"
             table.insert(stepLines, string.format(
                 "  • Craft %dx %s%s from raw materials",
                 step.countPerUnit or 1,
-                step.recipeName or "intermediate material",
+                targetLabel,
                 profLabel
             ))
         end

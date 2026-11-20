@@ -222,9 +222,14 @@ PF.SideWindow.eventFrame:Trigger("AUCTION_HOUSE_CLOSED")
 Assert(detailFrame:IsShown() == true, "DetailWindow stays open outside the Auction House for Mailbox/Crafting tracking")
 
 -- Test Open Recipe button on a Crafting play
+Mock.selectedTradeSkill = nil
+Mock.castSpells = {}
 PF.DetailWindow.ShowOpportunity(topPlays[2])
 detailFrame.recipeBtn:Click()
-Assert(Mock.craftedTradeSkill ~= nil, "Clicking Open Recipe triggers crafting / selects recipe")
+Assert(Mock.selectedTradeSkill ~= nil, "Clicking Open Recipe opens crafting window and selects recipe")
+Assert(Mock.craftedTradeSkill == nil, "Clicking Open Recipe does not auto-craft without user crafting")
+PF.RecipeScanner.CraftRecipe(topPlays[2].recipe, 1)
+Assert(Mock.craftedTradeSkill ~= nil, "CraftRecipe directly triggers crafting when called explicitly")
 
 -- 8. Test One-Click "Buy Next" Button in DetailWindow
 PF.DetailWindow.ShowOpportunity(topPlays[1])
@@ -590,12 +595,43 @@ do
 
     Assert(PF.MarketFeed.IsFresh(7200) == true and PF.MarketFeed.IsFresh(300) == false, "MarketFeed.IsFresh supports custom maxAgeSeconds window")
 
+    -- By default (marketFeedVerifySkipSeconds = 0), clicking Find Top 5 Plays at the AH ALWAYS runs live queries
+    -- even when MarketFeed is fresh (<2h), so stale/sold-out deals are never falsely shown as [Verified AH]!
+    _G.C_AuctionHouse.GetItemKeyInfo = function(key)
+        return { itemID = key.itemID, isCommodity = true }
+    end
+    Mock.timers = {}
+    searchCalls = 0
+    PF.AHVerifier.StartDiscoveryAndVerification()
+    Assert(PF.AHVerifier.IsRunning() == true, "Default StartDiscoveryAndVerification runs live AH verification even when MarketFeed is fresh")
+    local defaultStep = table.remove(Mock.timers, 1)
+    if defaultStep and defaultStep.callback then defaultStep.callback() end
+    Assert(searchCalls == 1, "Default click sends live C_AuctionHouse.SendSearchQuery instead of blindly trusting MarketFeed")
+    PF.AHVerifier.Stop("TEST_DEFAULT_LIVE")
+    Mock.timers = {}
+
+    -- Opt-in marketFeedVerifySkipSeconds = 7200 skips live queries ONLY when MarketFeed is newer than PCF_DB,
+    -- and never falsely stamps offline-feed-only plays as Verified AH.
+    local origSkipSec = Profitable_DB.settings.marketFeedVerifySkipSeconds
+    Profitable_DB.settings.marketFeedVerifySkipSeconds = 7200
+    _G.Profitable_MarketFeed.timestamp = math.floor(Mock.currentTime) + 60 -- Newer than PCF_DB entries
     Mock.timers = {}
     searchCalls = 0
     local playsFromFeed = PF.AHVerifier.StartDiscoveryAndVerification()
-    Assert(PF.AHVerifier.IsRunning() == false, "StartDiscoveryAndVerification finishes immediately without live queries when MarketFeed < 2h")
-    Assert(searchCalls == 0, "Normal click skips C_AuctionHouse.SendSearchQuery when items are covered by fresh MarketFeed")
-    Assert(playsFromFeed and playsFromFeed[1] and playsFromFeed[1].verified == true, "Top plays backed by fresh MarketFeed are marked verified")
+    Assert(PF.AHVerifier.IsRunning() == false, "Opt-in marketFeedVerifySkipSeconds skips live queries when MarketFeed is fresher than PCF_DB")
+    Assert(searchCalls == 0, "Opt-in MarketFeed skip avoids C_AuctionHouse.SendSearchQuery when MarketFeed is active source")
+    Assert(playsFromFeed and playsFromFeed[1] and playsFromFeed[1].verified == false, "Offline MarketFeed-only plays are NOT falsely marked [Verified AH]")
+
+    -- Even with opt-in marketFeedVerifySkipSeconds = 7200, if PCF_DB is NEWER than MarketFeed (e.g. a 1-unit sniff),
+    -- AHVerifier MUST still run live verification!
+    _G.Profitable_MarketFeed.timestamp = math.floor(Mock.currentTime) - 600 -- Older than PCF_DB entries
+    Mock.timers = {}
+    searchCalls = 0
+    PF.AHVerifier.StartDiscoveryAndVerification()
+    Assert(PF.AHVerifier.IsRunning() == true, "Opt-in MarketFeed skip still runs live verification when PCF_DB overrides MarketFeed")
+    PF.AHVerifier.Stop("TEST_OPTIN_PCF_OVERRIDE")
+    Mock.timers = {}
+    Profitable_DB.settings.marketFeedVerifySkipSeconds = origSkipSec
 
     -- Shift-click (forceLiveVerify = true) must still run live AH queries AND switch away from CommoditiesSellFrame
     local switchedDisplayMode = nil
@@ -1083,6 +1119,463 @@ do
     _G.C_ChatInfo = origChatInfo
     _G.AuctionFrame = origAuctionFrame
     _G.AuctionHouseFrame = origAuctionHouseFrame
+end
+
+-- 21. Regression Tests: Hot Wolf Ribs Live AH Validation, Per-Recipe Profession Detection, Self-Healing & Open Cooking Button
+do
+    local origCTradeSkillUI = _G.C_TradeSkillUI
+    local origProfessionsFrame = _G.ProfessionsFrame
+    local origCAH = _G.C_AuctionHouse
+    local origAHFrame = _G.AuctionHouseFrame
+    local origAuctionFrame = _G.AuctionFrame
+    local origMarketFeed = _G.Profitable_MarketFeed
+    local origGetNumTradeSkills = _G.GetNumTradeSkills
+
+    -- 21A. Config v1 -> v2 migration resets old default marketFeedVerifySkipSeconds = 7200 to 0
+    local legacyV1DB = {
+        version = 1,
+        settings = {
+            marketFeedVerifySkipSeconds = 7200,
+        },
+    }
+    _G.PF.LoadConfig(legacyV1DB)
+    Assert(legacyV1DB.version == 2 and legacyV1DB.settings.marketFeedVerifySkipSeconds == 0, "v1 -> v2 migration resets legacy marketFeedVerifySkipSeconds (7200 -> 0)")
+
+    -- 21B. Modern C_TradeSkillUI per-recipe profession resolution (immune to window-switch race conditions)
+    _G.GetNumTradeSkills = function() return 0 end -- Force modern C_TradeSkillUI path
+    local openedTradeSkillIds = {}
+    local openedRecipeIds = {}
+    local craftedRecipeIds = {}
+    local selectedModernRecipes = {}
+
+    local profByRecipe = {
+        [15856] = { professionID = 2548, professionName = "Classic Cooking", parentProfessionID = 185, parentProfessionName = "Cooking" },
+        [2541]  = { professionID = 2548, professionName = "Classic Cooking" }, -- Missing parentProfessionID: must still normalize to base 185 ("Cooking")!
+        [2657]  = { professionID = 2572, professionName = "Classic Mining",  parentProfessionID = 186, parentProfessionName = "Mining" },
+        [14807] = { professionID = 2494, professionName = "Classic Enchanting", parentProfessionID = 333, parentProfessionName = "Enchanting" },
+        [10001] = { professionID = 2477, professionName = "Classic Blacksmithing", parentProfessionID = 164, parentProfessionName = "Blacksmithing" },
+    }
+    local modernRecipes = {
+        [15856] = {
+            info = { recipeID = 15856, name = "Hot Wolf Ribs", learned = true, itemID = 13851 },
+            schematic = {
+                outputItemID = 13851,
+                quantityMin = 1,
+                quantityMax = 1,
+                reagentSlotSchematics = {
+                    { quantityRequired = 1, reagents = { { itemID = 12203 } } },
+                    { quantityRequired = 1, reagents = { { itemID = 2692 } } },
+                },
+            },
+        },
+    }
+
+    _G.ProfessionsFrame = _G.CreateFrame("Frame", "ProfessionsFrame", _G.UIParent)
+    _G.ProfessionsFrame:Hide()
+    _G.ProfessionsFrame.CraftingPage = {
+        SelectRecipe = function(_, rInfo)
+            table.insert(selectedModernRecipes, rInfo and rInfo.recipeID)
+        end,
+    }
+
+    _G.C_TradeSkillUI = {
+        IsTradeSkillLinked = function() return false end,
+        IsTradeSkillGuild = function() return false end,
+        IsTradeSkillReady = function() return true end,
+        GetAllRecipeIDs = function() return { 15856 } end,
+        -- Simulate the exact WoW: Forever window-switch race bug where GetChildProfessionInfo/GetBaseProfessionInfo
+        -- report "Mining" while GetAllRecipeIDs still returns Cooking recipes!
+        GetChildProfessionInfo = function() return { professionID = 186, professionName = "Mining" } end,
+        GetBaseProfessionInfo = function() return { professionID = 186, professionName = "Mining" } end,
+        GetProfessionInfoByRecipeID = function(rId) return profByRecipe[rId] end,
+        GetRecipeInfo = function(rId) return modernRecipes[rId] and modernRecipes[rId].info or nil end,
+        GetRecipeSchematic = function(rId) return modernRecipes[rId] and modernRecipes[rId].schematic or nil end,
+        OpenTradeSkill = function(skillLineId)
+            table.insert(openedTradeSkillIds, skillLineId)
+            _G.ProfessionsFrame:Show()
+            return true
+        end,
+        OpenRecipe = function(rId)
+            table.insert(openedRecipeIds, rId)
+        end,
+        CraftRecipe = function(rId, qty)
+            table.insert(craftedRecipeIds, { recipeId = rId, qty = qty })
+        end,
+    }
+
+    _G.Profitable_DB.itemCache[13851] = { name = "Hot Wolf Ribs", quality = 1, itemLevel = 35, classID = 0, subClassID = 5, itemSubType = "Food & Drink", vendorSell = 312 }
+    _G.Profitable_DB.itemCache[12203] = { name = "Red Wolf Meat", quality = 1, itemLevel = 30, classID = 7, subClassID = 8, itemSubType = "Cooking", vendorSell = 87 }
+    _G.Profitable_DB.charRecipes = {}
+
+    local modernScanned = _G.PF.RecipeScanner.ScanCurrentProfessionWindow()
+    Assert(modernScanned == 1, "ScanModernTradeSkillUI scans Hot Wolf Ribs recipe")
+    local charKey = _G.PF.GetCharacterKey()
+    local scannedRibs = _G.Profitable_DB.charRecipes[charKey]["15856:Hot Wolf Ribs"]
+    Assert(
+        scannedRibs ~= nil and scannedRibs.profession == "Cooking" and scannedRibs.professionId == 185,
+        "Hot Wolf Ribs resolves to Cooking (185) via GetProfessionInfoByRecipeID even when window reports Mining"
+    )
+
+    -- 21C. Self-healing corrupted SavedVariables recipes (Mining/Fishing/Crafting -> Cooking/Mining/Enchanting/Blacksmithing)
+    _G.Profitable_DB.charRecipes[charKey] = {
+        ["15856:Hot Wolf Ribs"] = {
+            recipeId = 15856, name = "Hot Wolf Ribs", profession = "Mining", outputItemId = 13851, avgMade = 1,
+            reagents = { { itemId = 12203, name = "Red Wolf Meat", count = 1 }, { itemId = 2692, name = "Hot Spices", count = 1 } },
+        },
+        ["2657:Smelt Copper"] = {
+            recipeId = 2657, name = "Smelt Copper", profession = "Fishing", outputItemId = 2840, avgMade = 1,
+            reagents = { { itemId = 2770, name = "Copper Ore", count = 1 } },
+        },
+        ["14807:Greater Magic Wand"] = {
+            recipeId = 14807, name = "Greater Magic Wand", profession = "Crafting", outputItemId = 11288, avgMade = 1,
+            reagents = { { itemId = 4470, name = "Simple Wood", count = 1 }, { itemId = 10939, name = "Greater Magic Essence", count = 1 } },
+        },
+        ["10001:Big Black Mace"] = {
+            recipeId = 10001, name = "Big Black Mace", profession = "Mining", outputItemId = 7945, avgMade = 1,
+            reagents = { { itemId = 3860, name = "Mithril Bar", count = 16 } },
+        },
+    }
+    local repairedCount = _G.PF.RecipeScanner.RepairSavedRecipeProfessions()
+    Assert(repairedCount >= 4, "RepairSavedRecipeProfessions heals all corrupted saved recipes")
+    Assert(_G.Profitable_DB.charRecipes[charKey]["15856:Hot Wolf Ribs"].profession == "Cooking", "Saved Hot Wolf Ribs healed from Mining -> Cooking")
+    Assert(_G.Profitable_DB.charRecipes[charKey]["2657:Smelt Copper"].profession == "Mining", "Saved Smelt Copper healed from Fishing -> Mining")
+    Assert(_G.Profitable_DB.charRecipes[charKey]["14807:Greater Magic Wand"].profession == "Enchanting", "Saved Greater Magic Wand healed from Crafting -> Enchanting")
+    Assert(_G.Profitable_DB.charRecipes[charKey]["10001:Big Black Mace"].profession == "Blacksmithing", "Saved Big Black Mace healed from Mining -> Blacksmithing")
+    local childOnlyRecipe = { recipeId = 2541, name = "Coyote Steak", profession = "Mining", outputItemId = 2684 }
+    _G.PF.RecipeScanner.NormalizeRecipeProfession(childOnlyRecipe)
+    Assert(childOnlyRecipe.profession == "Cooking" and childOnlyRecipe.professionId == 185, "Child-only expansion ProfessionInfo ('Classic Cooking' / 2548) normalizes to base Cooking (185)")
+
+    -- 21D. Open Cooking button opens Cooking window (185) and selects Hot Wolf Ribs (15856) instead of silently calling CraftRecipe
+    local ribsOppForBtn = {
+        id = "CRAFT_VENDOR:13851",
+        actionType = "CRAFT_VENDOR",
+        actionLabel = "Craft and Vendor",
+        itemId = 13851,
+        itemName = "Hot Wolf Ribs",
+        itemLink = "|cffffffff|Hitem:13851:0:0:0|h[Hot Wolf Ribs]|h|r",
+        recipe = _G.Profitable_DB.charRecipes[charKey]["15856:Hot Wolf Ribs"],
+        quantity = 200,
+        totalCost = 41400,
+        totalNetRevenue = 62400,
+        totalProfit = 21000,
+        roiPercent = 51,
+        verified = false,
+        shoppingList = {
+            { itemId = 12203, name = "Red Wolf Meat", link = "[Red Wolf Meat]", source = "AH", totalQuantity = 200, avgUnitPrice = 167, minUnitPrice = 167, maxUnitPrice = 167, totalCost = 33400 },
+            { itemId = 2692, name = "Hot Spices", link = "[Hot Spices]", source = "Vendor", totalQuantity = 200, avgUnitPrice = 40, minUnitPrice = 40, maxUnitPrice = 40, totalCost = 8000 },
+        },
+    }
+    _G.PF.DetailWindow.ShowOpportunity(ribsOppForBtn)
+    Assert(_G.PF.DetailWindow.frame.recipeBtn:GetText() == "Open Cooking", "DetailWindow recipe button reads 'Open Cooking' for Hot Wolf Ribs")
+    Assert(_G.PF.DetailWindow.frame.descText:GetText():find("%(Cooking%)") ~= nil, "DetailWindow explanation displays '(Cooking)' for Hot Wolf Ribs")
+
+    _G.PF.DetailWindow.frame.recipeBtn:Click()
+    Assert(#openedTradeSkillIds == 1 and openedTradeSkillIds[1] == 185, "Clicking 'Open Cooking' calls C_TradeSkillUI.OpenTradeSkill(185)")
+    Assert(#openedRecipeIds >= 1 and openedRecipeIds[1] == 15856, "Clicking 'Open Cooking' selects Hot Wolf Ribs recipe (15856)")
+    Assert(#craftedRecipeIds == 0, "Clicking 'Open Cooking' NEVER calls C_TradeSkillUI.CraftRecipe")
+
+    -- Simulate TRADE_SKILL_DATA_SOURCE_CHANGED firing after OpenTradeSkill opens ProfessionsFrame
+    _G.PF.RecipeScanner.frame:Trigger("TRADE_SKILL_DATA_SOURCE_CHANGED")
+    Assert(#selectedModernRecipes >= 1 and selectedModernRecipes[1] == 15856, "TRADE_SKILL_DATA_SOURCE_CHANGED selects pending recipe in ProfessionsFrame.CraftingPage")
+
+    -- 21E. Hot Wolf Ribs stale 1s67c price is live-validated on AH and eliminated when real AH price is 3s+
+    local now21 = math.floor(Mock.currentTime)
+    _G.PCF_DB.prices = {
+        [12203] = { minBuyout = 167, minBid = 167, count = 3731, lastUpdated = now21, source = "PCF Sniff" },
+    }
+    _G.PCF_DB.lastFullScan = now21
+    _G.Profitable_DB.orderBookCache = {}
+    _G.Profitable_DB.settings.includeSkillMatchedBaselineRecipes = false
+    -- Keep ONLY Hot Wolf Ribs in charRecipes so it starts as #1 before live AH validation
+    _G.Profitable_DB.charRecipes[charKey] = {
+        ["15856:Hot Wolf Ribs"] = _G.Profitable_DB.charRecipes[charKey]["15856:Hot Wolf Ribs"],
+    }
+    _G.Profitable_MarketFeed = {
+        timestamp = now21 - 600, -- 10 min old MarketFeed (previously caused AHVerifier to SKIP live check!)
+        region = "us",
+        rulesetId = 1,
+        houseId = 113,
+        items = {
+            [12203] = { m = 290, q = 3731, med = 265, obs = 28, tiers = { { 290, 311 }, { 300, 156 } } },
+        },
+    }
+
+    _G.AuctionFrame = nil
+    _G.AuctionHouseFrame = _G.CreateFrame("Frame", "AuctionHouseFrame", _G.UIParent)
+    _G.AuctionHouseFrame:Show()
+    local liveQueries21 = {}
+    _G.C_AuctionHouse = {
+        MakeItemKey = function(id) return { itemID = id, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 } end,
+        GetItemKeyInfo = function(key) return { itemID = key.itemID, isCommodity = true } end,
+        IsThrottledMessageSystemReady = function() return true end,
+        SendSearchQuery = function(itemKey)
+            table.insert(liveQueries21, itemKey.itemID)
+            if itemKey.itemID == 12203 then
+                _G.PF.AHVerifier.frame:Trigger("COMMODITY_SEARCH_RESULTS_UPDATED", 12203)
+            end
+        end,
+        GetNumCommoditySearchResults = function(id)
+            if id == 12203 then return 2 end
+            return 0
+        end,
+        GetCommoditySearchResultInfo = function(id, idx)
+            if id == 12203 then
+                local liveRows = {
+                    { unitPrice = 300, quantity = 150 }, -- 3s each (300c + 40c spices = 340c > 312c vendor = LOSS!)
+                    { unitPrice = 350, quantity = 200 },
+                }
+                return liveRows[idx]
+            end
+            return nil
+        end,
+    }
+
+    Mock.timers = {}
+    _G.PF.AHVerifier.StartDiscoveryAndVerification()
+    Mock.FlushTimers(50)
+
+    Assert(#liveQueries21 >= 1 and liveQueries21[1] == 12203, "Live AH verification queries Red Wolf Meat (12203) even when MarketFeed < 2h")
+    local foundRibsAfterVerify = false
+    for _, opp in ipairs(_G.Profitable_DB.lastTopPlays or {}) do
+        if opp.itemId == 13851 then foundRibsAfterVerify = true end
+    end
+    Assert(foundRibsAfterVerify == false, "Hot Wolf Ribs is eliminated after live AH check confirms Red Wolf Meat is 3s+ (loss to vendor)")
+    Assert(_G.PCF_DB.prices[12203] and _G.PCF_DB.prices[12203].minBuyout == 300, "Live AH check updates PCF_DB price for Red Wolf Meat from 1s67c to 3s")
+
+    -- 21F. DetailWindow live revalidation flags an already-open play as [No Longer Profitable] when AH prices jump
+    _G.PF.DetailWindow.ShowOpportunity(ribsOppForBtn)
+    _G.PF.AHVerifier.frame:Trigger("COMMODITY_SEARCH_RESULTS_UPDATED", 12203)
+    Assert(
+        _G.PF.DetailWindow.frame.titleText:GetText():find("No Longer Profitable") ~= nil,
+        "DetailWindow immediately updates badge to [No Longer Profitable] when live AH price exceeds max profitable cost"
+    )
+    Assert(
+        _G.PF.DetailWindow.frame.shoppingRows[1].priceText:GetText():find("Live AH: 3s ea") ~= nil,
+        "DetailWindow shopping row displays live AH unit price warning (3s ea > max 1s 67c)"
+    )
+
+    -- Restore globals
+    _G.C_TradeSkillUI = origCTradeSkillUI
+    _G.ProfessionsFrame = origProfessionsFrame
+    _G.C_AuctionHouse = origCAH
+    _G.AuctionHouseFrame = origAHFrame
+    _G.AuctionFrame = origAuctionFrame
+    _G.Profitable_MarketFeed = origMarketFeed
+    _G.GetNumTradeSkills = origGetNumTradeSkills
+end
+
+-- 22. Regression Tests: "Open in AH" Throttle Queue & Stall Recovery + Multi-Step Inventory & Craft Sub-Rows (Ornate Mithril Helm)
+do
+    local origCTradeSkillUI = _G.C_TradeSkillUI
+    local origProfessionsFrame = _G.ProfessionsFrame
+    local origCAH = _G.C_AuctionHouse
+    local origAHFrame = _G.AuctionHouseFrame
+    local origAuctionFrame = _G.AuctionFrame
+    local origGetNumTradeSkills = _G.GetNumTradeSkills
+
+    -- 22A. "Open in AH" waits for throttle readiness, preserves AuctionHouseFrame.displayMode, and recovers from "Searching..." stalls
+    _G.AuctionFrame = nil
+    local throttleReady = false
+    local selectBrowseCalls = {}
+    local sendSearchCalls = {}
+    local qtyInputCalls = {}
+    local onQtyChangedCalls = 0
+
+    _G.AuctionHouseFrame = _G.CreateFrame("Frame", "AuctionHouseFrame", _G.UIParent)
+    _G.AuctionHouseFrame:Show()
+    _G.AuctionHouseFrame.displayMode = "CommoditiesBuy"
+    _G.AuctionHouseFrame.SearchBar = { SearchBox = { SetText = function() end } }
+    _G.AuctionHouseFrame.CommoditiesBuyFrame = {
+        IsShown = function() return true end,
+        BuyList = { itemID = nil },
+        BuyDisplay = {
+            QuantityInput = {
+                SetQuantity = function(_, q) table.insert(qtyInputCalls, { mode = "SetQuantity", q = q }) end,
+                InputBox = {
+                    SetNumber = function(_, q) table.insert(qtyInputCalls, { mode = "SetNumber", q = q }) end,
+                },
+            },
+        },
+        OnQuantityChanged = function() onQtyChangedCalls = onQtyChangedCalls + 1 end,
+    }
+    _G.AuctionHouseFrame.SelectBrowseResult = function(self, rowData)
+        table.insert(selectBrowseCalls, rowData)
+        self.displayMode = "CommoditiesBuy"
+        self.CommoditiesBuyFrame.BuyList.itemID = rowData.itemKey.itemID
+    end
+
+    _G.C_AuctionHouse = {
+        MakeItemKey = function(id) return { itemID = id, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 } end,
+        GetItemKeyInfo = function(key) return { itemID = key.itemID, isCommodity = true } end,
+        IsThrottledMessageSystemReady = function() return throttleReady end,
+        SendSearchQuery = function(itemKey, sorts, isItem)
+            table.insert(sendSearchCalls, { itemID = itemKey.itemID, isItem = isItem })
+        end,
+        GetNumCommoditySearchResults = function(id) return (id == 7971) and 1 or 0 end,
+        GetCommoditySearchResultInfo = function(id, idx)
+            if id == 7971 and idx == 1 then return { unitPrice = 1376, quantity = 10 } end
+            return nil
+        end,
+    }
+
+    Mock.timers = {}
+    -- Click "Open in AH" on Black Pearl (7971) while throttled -> MUST defer instead of dropping search!
+    _G.PF.AHVerifier.SearchItemOnAH(7971, "Black Pearl", nil, 3)
+    Assert(#selectBrowseCalls == 0, "Open in AH defers SelectBrowseResult while C_AuctionHouse throttle is busy")
+
+    -- Throttle clears -> AUCTION_HOUSE_THROTTLED_SYSTEM_READY flushes SelectBrowseResult cleanly!
+    throttleReady = true
+    _G.PF.AHVerifier.frame:Trigger("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+    Assert(#selectBrowseCalls == 1 and selectBrowseCalls[1].itemKey.itemID == 7971, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY triggers deferred SelectBrowseResult for Black Pearl")
+    Assert(_G.AuctionHouseFrame.displayMode == "CommoditiesBuy", "OpenItemKeyInDefaultAH preserves AuctionHouseFrame.displayMode (never wipes to nil)")
+    Assert(onQtyChangedCalls == 0, "Does NOT invoke OnQuantityChanged prematurely before search results arrive")
+
+    -- Simulate stall (no COMMODITY_SEARCH_RESULTS_UPDATED received) -> stall watchdog fires SendSearchQuery!
+    Assert(#sendSearchCalls == 0, "No duplicate SendSearchQuery on the same tick as SelectBrowseResult")
+    Mock.FlushTimers(5)
+    Assert(#sendSearchCalls >= 1 and sendSearchCalls[1].itemID == 7971, "Stall-recovery watchdog automatically re-sends SendSearchQuery when 'Searching...' hangs")
+
+    -- When COMMODITY_SEARCH_RESULTS_UPDATED finally arrives, quantity updates cleanly via OnQuantityChanged
+    _G.PF.AHVerifier.frame:Trigger("COMMODITY_SEARCH_RESULTS_UPDATED", 7971)
+    Assert(onQtyChangedCalls == 1, "COMMODITY_SEARCH_RESULTS_UPDATED triggers OnQuantityChanged cleanly once listings arrive")
+
+    -- 22B. Multi-step Ornate Mithril Helm (x3): live intermediate inventory awareness, craft sub-rows & per-step Open buttons
+    _G.GetNumTradeSkills = function() return 0 end
+    local openedProfIds22 = {}
+    local openedRecipeIds22 = {}
+    local profMap22 = {
+        [9980]  = { professionID = 164, professionName = "Blacksmithing", parentProfessionID = 164, parentProfessionName = "Blacksmithing" },
+        [10097] = { professionID = 186, professionName = "Mining",        parentProfessionID = 186, parentProfessionName = "Mining" },
+        [10098] = { professionID = 186, professionName = "Mining",        parentProfessionID = 186, parentProfessionName = "Mining" },
+        [9920]  = { professionID = 164, professionName = "Blacksmithing", parentProfessionID = 164, parentProfessionName = "Blacksmithing" },
+    }
+    _G.ProfessionsFrame = _G.CreateFrame("Frame", "ProfessionsFrame", _G.UIParent)
+    _G.ProfessionsFrame:Hide()
+    _G.C_TradeSkillUI = {
+        GetProfessionInfoByRecipeID = function(rId) return profMap22[rId] end,
+        OpenTradeSkill = function(skillId)
+            table.insert(openedProfIds22, skillId)
+            return true
+        end,
+        OpenRecipe = function(rId)
+            table.insert(openedRecipeIds22, rId)
+        end,
+    }
+
+    local charKey22 = _G.PF.GetCharacterKey()
+    local now22 = math.floor(Mock.currentTime)
+    _G.Profitable_DB.settings.includeSkillMatchedBaselineRecipes = false
+    _G.Profitable_DB.settings.useIntermediateCrafting = true
+    _G.Profitable_DB.itemCache[7937] = { name = "Ornate Mithril Helm", quality = 2, itemLevel = 44, classID = 4, invType = "INVTYPE_HEAD", vendorSell = 2028 }
+    _G.Profitable_DB.charRecipes[charKey22] = {
+        ["9980:Ornate Mithril Helm"] = {
+            recipeId = 9980, name = "Ornate Mithril Helm", profession = "Blacksmithing", professionId = 164,
+            outputItemId = 7937, avgMade = 1,
+            reagents = {
+                { itemId = 3860, name = "Mithril Bar", count = 16 },
+                { itemId = 6037, name = "Truesilver Bar", count = 2 },
+                { itemId = 7971, name = "Black Pearl", count = 1 },
+                { itemId = 7966, name = "Solid Grinding Stone", count = 1 },
+            },
+        },
+        ["10097:Smelt Mithril"] = {
+            recipeId = 10097, name = "Smelt Mithril", profession = "Mining", professionId = 186,
+            outputItemId = 3860, avgMade = 1,
+            reagents = { { itemId = 3858, name = "Mithril Ore", count = 1 } },
+        },
+        ["10098:Smelt Truesilver"] = {
+            recipeId = 10098, name = "Smelt Truesilver", profession = "Mining", professionId = 186,
+            outputItemId = 6037, avgMade = 1,
+            reagents = { { itemId = 7911, name = "Truesilver Ore", count = 1 } },
+        },
+        ["9920:Solid Grinding Stone"] = {
+            recipeId = 9920, name = "Solid Grinding Stone", profession = "Blacksmithing", professionId = 164,
+            outputItemId = 7966, avgMade = 1,
+            reagents = { { itemId = 7912, name = "Solid Stone", count = 4 } },
+        },
+    }
+
+    -- Prices: Ore/Stone cheaper than Bars/Grinding Stone, Helm profitable to Craft & AH
+    _G.Profitable_DB.orderBookCache = {}
+    _G.PCF_DB.prices = {
+        [3858] = { minBuyout = 1040, count = 100, lastUpdated = now22, source = "Scan" }, -- Mithril Ore 10s40c
+        [3860] = { minBuyout = 1500, count = 100, lastUpdated = now22, source = "Scan" }, -- Mithril Bar 15s (more expensive than ore)
+        [7911] = { minBuyout = 1225, count = 50,  lastUpdated = now22, source = "Scan" }, -- Truesilver Ore 12s25c
+        [6037] = { minBuyout = 1800, count = 50,  lastUpdated = now22, source = "Scan" }, -- Truesilver Bar 18s
+        [7971] = { minBuyout = 1376, count = 10,  lastUpdated = now22, source = "Scan" }, -- Black Pearl 13s76c
+        [7912] = { minBuyout = 133,  count = 100, lastUpdated = now22, source = "Scan" }, -- Solid Stone 1s33c
+        [7966] = { minBuyout = 900,  count = 50,  lastUpdated = now22, source = "Scan" }, -- Solid Grinding Stone 9s
+        [7937] = { minBuyout = 35069, count = 5,  lastUpdated = now22, source = "Scan" }, -- Ornate Mithril Helm 3g50s69c
+    }
+
+    Mock.bagCounts = { [7912] = 40 } -- 40 Solid Stone in bags, 0 bars/ores/pearls
+    Mock.bankCounts = {}
+    local helmTop = _G.PF.OpportunityEngine.FindTopOpportunities(500000)
+    local helmOpp = nil
+    for _, o in ipairs(helmTop) do
+        if o.itemId == 7937 then helmOpp = o end
+    end
+    Assert(helmOpp ~= nil and helmOpp.quantity == 3, "Calculate Craft & AH Ornate Mithril Helm (x3) with intermediate steps")
+    Assert(helmOpp.intermediateSteps and #helmOpp.intermediateSteps == 3, "Ornate Mithril Helm records all 3 intermediate craft steps (Mithril Bar, Truesilver Bar, Solid Grinding Stone)")
+
+    _G.PF.DetailWindow.ShowOpportunity(helmOpp)
+    local rows22 = _G.PF.DetailWindow.frame.shoppingRows
+    -- Expected interleaved rows:
+    -- 1: SHOP Mithril Ore (48x)
+    -- 2: CRAFT Mithril Bar (48x) -> Open Mining
+    -- 3: SHOP Truesilver Ore (6x)
+    -- 4: CRAFT Truesilver Bar (6x) -> Open Mining
+    -- 5: SHOP Black Pearl (3x)
+    -- 6: SHOP Solid Stone (12x) -> Ready: 40 / 12
+    -- 7: CRAFT Solid Grinding Stone (3x) -> Open Blacksmithing (mats ready!)
+    Assert(rows22[1]._rowKind == "SHOP" and rows22[1]._itemData.itemId == 3858, "Row 1 is Mithril Ore shopping item")
+    Assert(rows22[2]._rowKind == "CRAFT" and rows22[2]._stepData.outputItemId == 3860, "Row 2 is indented Mithril Bar craft sub-row")
+    Assert(rows22[2].craftBtn:IsShown() == true and rows22[2].craftBtn:GetText() == "Open Mining", "Mithril Bar sub-row displays 'Open Mining' button")
+    Assert(rows22[7]._rowKind == "CRAFT" and rows22[7]._stepData.outputItemId == 7966, "Row 7 is indented Solid Grinding Stone craft sub-row")
+    Assert(rows22[7].craftBtn:GetText() == "Open Blacksmithing", "Solid Grinding Stone sub-row displays 'Open Blacksmithing' button")
+    Assert(rows22[7].statusText:GetText():find("mats ready") ~= nil, "Solid Grinding Stone sub-row shows '(mats ready!)' when 40 Solid Stone are in bags")
+    Assert(_G.PF.DetailWindow.frame.recipeBtn:GetText() == "Open Blacksmithing", "Footer recipe button displays 'Open Blacksmithing' for final Ornate Mithril Helm")
+
+    -- Clicking sub-row "Open Mining" opens Mining (186) to Smelt Mithril (10097)
+    rows22[2].craftBtn:Click()
+    Assert(openedProfIds22[1] == 186 and openedRecipeIds22[1] == 10097, "Clicking Mithril Bar sub-row 'Open Mining' opens Mining (186) to Smelt Mithril (10097)")
+
+    -- Clicking sub-row "Open Blacksmithing" opens Blacksmithing (164) to Solid Grinding Stone (9920)
+    rows22[7].craftBtn:Click()
+    Assert(openedProfIds22[2] == 164 and openedRecipeIds22[2] == 9920, "Clicking Solid Grinding Stone sub-row 'Open Blacksmithing' opens Blacksmithing (164) to Solid Grinding Stone (9920)")
+
+    -- Clicking footer "Open Blacksmithing" opens Blacksmithing (164) to Ornate Mithril Helm (9980)
+    _G.PF.DetailWindow.frame.recipeBtn:Click()
+    Assert(openedProfIds22[3] == 164 and openedRecipeIds22[3] == 9980, "Clicking footer 'Open Blacksmithing' opens Blacksmithing (164) to Ornate Mithril Helm (9980)")
+
+    -- Scenario 1: Player ALREADY has 48 Mithril Bars in bags (0 Mithril Ore) -> Mithril Ore is completely satisfied!
+    Mock.bagCounts[3860] = 48
+    Mock.bagCounts[3858] = 0
+    _G.PF.DetailWindow.RefreshIfShown()
+    Assert(rows22[1]._itemData.effectiveQuantity == 0 and rows22[1]._itemData.remainingToBuy == 0, "Having 48 Mithril Bars sets Mithril Ore effective needed & remainingToBuy to 0")
+    Assert(rows22[1].statusText:GetText():find("Covered by 48 / 48 Mithril Bar") ~= nil, "Mithril Ore status shows 'Covered by 48 / 48 Mithril Bar'")
+    Assert(rows22[1].buyBtn:GetText() == "Ready", "Mithril Ore buy button shows 'Ready' when satisfied by Mithril Bars")
+    Assert(rows22[2].statusText:GetText():find("Ready: 48 / 48") ~= nil, "Mithril Bar sub-row shows 'Ready: 48 / 48'")
+
+    -- Verify OpenNextNeededItemInDefaultAH SKIPS Mithril Ore (satisfied by bars) and opens Truesilver Ore (7911)!
+    selectBrowseCalls = {}
+    _G.PF.AHVerifier.OpenNextNeededItemInDefaultAH(helmOpp)
+    Assert(#selectBrowseCalls == 1 and selectBrowseCalls[1].itemKey.itemID == 7911, "OpenNextNeededItemInDefaultAH skips Mithril Ore when 48 Mithril Bars are already owned and opens Truesilver Ore")
+
+    -- Scenario 2: Partial intermediate inventory (20 Mithril Bars + 10 Mithril Ore in bags) -> only need 18 more Mithril Ore!
+    Mock.bagCounts[3860] = 20
+    Mock.bagCounts[3858] = 10
+    _G.PF.DetailWindow.RefreshIfShown()
+    Assert(rows22[1]._itemData.effectiveQuantity == 28 and rows22[1]._itemData.remainingToBuy == 18, "Having 20 Mithril Bars + 10 Mithril Ore reduces Mithril Ore needed to 28 and remainingToBuy to 18")
+    Assert(rows22[2].statusText:GetText():find("Have: 20 / 48") ~= nil and rows22[2].statusText:GetText():find("Craft 28") ~= nil and rows22[2].statusText:GetText():find("10 ready now") ~= nil, "Mithril Bar sub-row shows 'Have: 20 / 48 — Craft 28 (10 ready now)'")
+
+    -- Restore globals
+    _G.C_TradeSkillUI = origCTradeSkillUI
+    _G.ProfessionsFrame = origProfessionsFrame
+    _G.C_AuctionHouse = origCAH
+    _G.AuctionHouseFrame = origAHFrame
+    _G.AuctionFrame = origAuctionFrame
+    _G.GetNumTradeSkills = origGetNumTradeSkills
 end
 
 print("\nAll Profitable test assertions passed successfully!")

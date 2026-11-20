@@ -23,7 +23,7 @@ Profitable_DB = Profitable_DB or {}
 _G.Profitable_DB = Profitable_DB
 
 local defaultConfig = {
-    version = 1,
+    version = 2,
     settings = {
         enabled = true,
         ahCutRate = 0.05,                        -- Standard 5% faction AH cut (auto-switches to 15% at Neutral AH)
@@ -55,7 +55,7 @@ local defaultConfig = {
         spikeCapMultiplier = 1.25,               -- Cap estimated exit revenue to 1.25x 14-day median
         minHistoricalSamples = 3,                -- Require >= 3 hourly snapshots before enforcing spike cap
         mirrorFeedToPCF = true,                  -- Softly fill missing/older PCF_DB prices from MarketFeed when both are active
-        marketFeedVerifySkipSeconds = 7200,      -- Skip live AH query if MarketFeed order book is fresher than 2h (Shift-click forces live)
+        marketFeedVerifySkipSeconds = 0,         -- 0 = always live-verify top plays at AH even when MarketFeed is loaded
         showSideWindow = true,
         onboardingDismissed = false,             -- Show welcome/AH-scan popup on startup until user clicks OK / Got It
         staleDataThresholdSeconds = 86400,       -- Require a fresh AH scan when cached data is older than 24 hours
@@ -223,6 +223,17 @@ function PF.LoadConfig(customDB)
         Profitable_DB = (type(_G.Profitable_DB) == "table" and _G.Profitable_DB) or {}
     end
     _G.Profitable_DB = Profitable_DB
+
+    local prevVersion = tonumber(Profitable_DB.version) or 0
     ApplyDefaults(Profitable_DB, defaultConfig)
+
+    -- v2 migration: always live-verify top plays at the AH instead of skipping for 2h MarketFeed snapshots
+    if prevVersion > 0 and prevVersion < 2 then
+        if Profitable_DB.settings and Profitable_DB.settings.marketFeedVerifySkipSeconds == 7200 then
+            Profitable_DB.settings.marketFeedVerifySkipSeconds = 0
+        end
+        Profitable_DB.version = 2
+    end
+
     return Profitable_DB
 end

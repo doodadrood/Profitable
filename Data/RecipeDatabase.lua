@@ -578,5 +578,25 @@ function PF.RecipeDatabase.GetCharacterSkillRanks()
             end
         end
     end
+    if _G.GetProfessions and _G.GetProfessionInfo then
+        local okProfs, p1, p2, arch, fish, cook = pcall(_G.GetProfessions)
+        if okProfs then
+            local indices = { p1, p2, arch, fish, cook }
+            for _, idx in ipairs(indices) do
+                if type(idx) == "number" then
+                    local okInfo, profName, _, skillRank, skillMaxRank = pcall(_G.GetProfessionInfo, idx)
+                    if okInfo and type(profName) == "string" and profName ~= "" and type(skillRank) == "number" and skillRank > 0 then
+                        local existing = skills[profName]
+                        if not existing or skillRank > (existing.rank or 0) then
+                            skills[profName] = {
+                                rank = skillRank,
+                                maxRank = skillMaxRank or 300,
+                            }
+                        end
+                    end
+                end
+            end
+        end
+    end
     return skills
 end

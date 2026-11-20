@@ -7,9 +7,18 @@ PF.DetailWindow = {}
 local detailFrame = nil
 local currentOpportunity = nil
 local shoppingRows = {}
-local MAX_SHOPPING_ROWS = 12
+local MAX_SHOPPING_ROWS = 20
 local SCROLL_VIEWPORT_HEIGHT = 360
 local SCROLL_STEP = 38
+
+local function SetRowBackgroundColor(frame, bgR, bgG, bgB, bgA)
+    if not frame or not frame._pfBg then return end
+    if frame._pfBg.SetColorTexture then
+        frame._pfBg:SetColorTexture(bgR, bgG, bgB, bgA)
+    elseif frame._pfBg.SetTexture then
+        frame._pfBg:SetTexture(bgR, bgG, bgB, bgA)
+    end
+end
 
 local function SetBackdropSafe(frame, bgR, bgG, bgB, bgA)
     if not frame then return end
@@ -122,14 +131,15 @@ local function UpdateScrollRange()
     local estimatedHeight = EstimateWrappedTextHeight(rawText, 66, 14)
     local descHeight = math.max(measuredHeight, estimatedHeight, 24)
 
-    local visibleRows = 0
+    local rowsHeight = 0
     for i = 1, MAX_SHOPPING_ROWS do
-        if shoppingRows[i] and shoppingRows[i]._itemData then
-            visibleRows = visibleRows + 1
+        local row = shoppingRows[i]
+        if row and (row._itemData or row._stepData) then
+            rowsHeight = rowsHeight + (row._rowHeight or 60)
         end
     end
 
-    local totalContentHeight = descHeight + 38 + (visibleRows * 60) + 12
+    local totalContentHeight = descHeight + 38 + rowsHeight + 14
     if detailFrame.scrollChild.SetHeight then
         detailFrame.scrollChild:SetHeight(math.max(SCROLL_VIEWPORT_HEIGHT, totalContentHeight))
     end
@@ -208,15 +218,27 @@ local function CreateShoppingRow(parent, index, anchorBelowFrame)
     if buyBtn.SetText then buyBtn:SetText("Buy Next") end
     BindMouseWheelForwarding(buyBtn)
 
+    local craftBtn = CreateFrame("Button", "PF_DetailShoppingCraftBtn" .. index, row, "UIPanelButtonTemplate")
+    if craftBtn.SetSize then craftBtn:SetSize(144, 22) end
+    if craftBtn.SetPoint then craftBtn:SetPoint("RIGHT", row, "RIGHT", -6, 0) end
+    if craftBtn.SetText then craftBtn:SetText("Open Crafting") end
+    craftBtn:Hide()
+    BindMouseWheelForwarding(craftBtn)
+
     itemBtn:SetScript("OnClick", function()
         if row._itemData then
             local rem = math.max(1, row._itemData.remainingToBuy or row._itemData.totalQuantity or 1)
             HandleItemLinkClick(row._itemData.itemId, row._itemData.name, row._itemData.link, rem)
+        elseif row._stepData then
+            local rem = math.max(1, row._stepData.remainingToCraft or row._stepData.totalQuantity or 1)
+            HandleItemLinkClick(row._stepData.outputItemId, row._stepData.outputName, row._stepData.outputLink, rem)
         end
     end)
     itemBtn:SetScript("OnEnter", function(self)
         if row._itemData then
             ShowItemTooltip(self, row._itemData.itemId, row._itemData.link)
+        elseif row._stepData then
+            ShowItemTooltip(self, row._stepData.outputItemId, row._stepData.outputLink)
         end
     end)
     itemBtn:SetScript("OnLeave", function()
@@ -225,16 +247,48 @@ local function CreateShoppingRow(parent, index, anchorBelowFrame)
 
     searchBtn:SetScript("OnClick", function()
         if row._itemData then
-            local rem = math.max(1, row._itemData.remainingToBuy or row._itemData.totalQuantity or 1)
+            local rem = math.max(1, (row._itemData.remainingToBuy and row._itemData.remainingToBuy > 0) and row._itemData.remainingToBuy or row._itemData.totalQuantity or 1)
             PF.AHVerifier.SearchItemOnAH(row._itemData.itemId, row._itemData.name, row._itemData.link, rem)
         end
     end)
 
     buyBtn:SetScript("OnClick", function()
         if row._itemData then
+            if row._itemData.remainingToBuy == 0 then
+                print(string.format("|cff00ff88[Profitable]|r You already have all required [%s] (covered by bags / crafted materials).", row._itemData.name or "Item"))
+                return
+            end
             local rem = math.max(1, row._itemData.remainingToBuy or row._itemData.totalQuantity or 1)
             PF.AHVerifier.BuyNextCheapListing(row._itemData.itemId, row._itemData.name, row._itemData.maxUnitPrice, rem)
         end
+    end)
+
+    craftBtn:SetScript("OnClick", function()
+        if row._stepData then
+            local targetRecipe = row._stepData.recipe or {
+                recipeId = row._stepData.recipeId,
+                name = row._stepData.recipeName or row._stepData.outputName,
+                profession = row._stepData.profession,
+                professionId = row._stepData.professionId,
+                outputItemId = row._stepData.outputItemId,
+            }
+            PF.RecipeScanner.OpenRecipe(targetRecipe)
+        end
+    end)
+    craftBtn:SetScript("OnEnter", function(self)
+        if not _G.GameTooltip or not row._stepData then return end
+        local prof = row._stepData.profession or "Profession"
+        _G.GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        _G.GameTooltip:AddLine("Open " .. prof, 0, 1, 0.5)
+        _G.GameTooltip:AddLine(string.format(
+            "Click to open your %s window directly to [%s].",
+            prof,
+            row._stepData.recipeName or row._stepData.outputName or "Recipe"
+        ), 1, 1, 1, true)
+        _G.GameTooltip:Show()
+    end)
+    craftBtn:SetScript("OnLeave", function()
+        if _G.GameTooltip then _G.GameTooltip:Hide() end
     end)
 
     row.itemBtn = itemBtn
@@ -243,6 +297,9 @@ local function CreateShoppingRow(parent, index, anchorBelowFrame)
     row.priceText = priceText
     row.searchBtn = searchBtn
     row.buyBtn = buyBtn
+    row.craftBtn = craftBtn
+    row._indentX = 0
+    row._rowHeight = 60
     return row
 end
 
@@ -383,8 +440,19 @@ local function EnsureDetailFrame()
     if recipeBtn.SetText then recipeBtn:SetText("Open Recipe") end
     recipeBtn:SetScript("OnClick", function()
         if currentOpportunity and currentOpportunity.recipe then
-            PF.RecipeScanner.CraftRecipe(currentOpportunity.recipe, currentOpportunity.quantity)
+            PF.RecipeScanner.OpenRecipe(currentOpportunity.recipe)
         end
+    end)
+    recipeBtn:SetScript("OnEnter", function(self)
+        if not _G.GameTooltip or not currentOpportunity or not currentOpportunity.recipe then return end
+        local prof = currentOpportunity.recipe.profession or "Profession"
+        _G.GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        _G.GameTooltip:AddLine("Open " .. prof, 0, 1, 0.5)
+        _G.GameTooltip:AddLine(string.format("Click to open your %s crafting window to [%s].", prof, currentOpportunity.recipe.name or currentOpportunity.itemName or "Recipe"), 1, 1, 1, true)
+        _G.GameTooltip:Show()
+    end)
+    recipeBtn:SetScript("OnLeave", function()
+        if _G.GameTooltip then _G.GameTooltip:Hide() end
     end)
 
     local searchTargetBtn = CreateFrame("Button", "PF_DetailSearchTargetButton", detailFrame, "UIPanelButtonTemplate")
@@ -432,8 +500,96 @@ local function EnsureDetailFrame()
     return detailFrame
 end
 
+local function OpportunityReferencesItem(opp, itemId)
+    if type(opp) ~= "table" or not itemId or itemId <= 0 then
+        return false
+    end
+    if opp.itemId == itemId or opp.targetMatId == itemId then
+        return true
+    end
+    if type(opp.shoppingList) == "table" then
+        for _, shop in ipairs(opp.shoppingList) do
+            if shop and shop.itemId == itemId then
+                return true
+            end
+        end
+    end
+    if opp.deBreakdown and type(opp.deBreakdown.drops) == "table" then
+        for _, d in ipairs(opp.deBreakdown.drops) do
+            if d and (d.sellItemId == itemId or d.itemId == itemId) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function PF.DetailWindow.RevalidateActiveOpportunity(updatedItemId)
+    if not detailFrame or (detailFrame.IsShown and not detailFrame:IsShown()) then
+        return false
+    end
+    local opp = currentOpportunity or (Profitable_DB and Profitable_DB.activePlay)
+    if not opp or not OpportunityReferencesItem(opp, updatedItemId) then
+        PF.DetailWindow.RefreshIfShown()
+        return false
+    end
+
+    if PF.AHVerifier and PF.AHVerifier.RecalculateFromCache then
+        local _, _, allEvaluated = PF.AHVerifier.RecalculateFromCache()
+        if PF.SideWindow and PF.SideWindow.RefreshRows then
+            PF.SideWindow.RefreshRows()
+        end
+
+        local matched = nil
+        if type(allEvaluated) == "table" and opp.id then
+            for _, cand in ipairs(allEvaluated) do
+                if cand and cand.id == opp.id then
+                    matched = cand
+                    break
+                end
+            end
+        end
+
+        if matched then
+            matched.explanation = matched.explanation or (PF.OpportunityEngine and PF.OpportunityEngine.BuildDetailedExplanation and PF.OpportunityEngine.BuildDetailedExplanation(matched))
+            matched._liveUnprofitable = false
+            currentOpportunity = matched
+            if Profitable_DB then
+                Profitable_DB.activePlay = matched
+            end
+        else
+            opp._liveUnprofitable = true
+            opp.verified = false
+            if type(opp.shoppingList) == "table" then
+                for _, shop in ipairs(opp.shoppingList) do
+                    if shop and shop.source == "AH" then
+                        local ob = Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[shop.itemId]
+                        if ob and (time() - (ob.timestamp or 0)) <= 600 then
+                            if ob.unavailable or type(ob.listings) ~= "table" or #ob.listings == 0 then
+                                shop._liveUnavailable = true
+                                shop._liveMinUnitPrice = nil
+                            else
+                                shop._liveUnavailable = false
+                                shop._liveMinUnitPrice = ob.listings[1] and ob.listings[1].unitPrice or nil
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    PF.DetailWindow.RefreshIfShown()
+    return true
+end
+
 function PF.DetailWindow.ShowOpportunity(opp)
     if not opp then return end
+    if opp.recipe and PF.RecipeScanner and PF.RecipeScanner.NormalizeRecipeProfession then
+        if PF.RecipeScanner.NormalizeRecipeProfession(opp.recipe) and PF.OpportunityEngine and PF.OpportunityEngine.BuildDetailedExplanation then
+            opp.explanation = PF.OpportunityEngine.BuildDetailedExplanation(opp)
+        end
+    end
     currentOpportunity = opp
     if Profitable_DB then
         Profitable_DB.activePlay = opp
@@ -457,7 +613,20 @@ function PF.DetailWindow.RefreshIfShown()
     local opp = currentOpportunity or (Profitable_DB and Profitable_DB.activePlay)
     if not opp then return end
 
-    local verBadge = opp.verified and "|cff00ff00[Verified AH]|r" or "|cffffcc00[Cached Scan]|r"
+    if opp.recipe and PF.RecipeScanner and PF.RecipeScanner.NormalizeRecipeProfession then
+        if PF.RecipeScanner.NormalizeRecipeProfession(opp.recipe) and PF.OpportunityEngine and PF.OpportunityEngine.BuildDetailedExplanation then
+            opp.explanation = PF.OpportunityEngine.BuildDetailedExplanation(opp)
+        end
+    end
+
+    local verBadge
+    if opp._liveUnprofitable then
+        verBadge = "|cffff4444[No Longer Profitable]|r"
+    elseif opp.verified then
+        verBadge = "|cff00ff00[Verified AH]|r"
+    else
+        verBadge = "|cffffcc00[Cached Scan]|r"
+    end
     if detailFrame.titleText then
         detailFrame.titleText:SetText(string.format("%s %s (x%d) %s", opp.actionLabel, opp.itemLink, opp.quantity, verBadge))
     end
@@ -473,10 +642,17 @@ function PF.DetailWindow.RefreshIfShown()
             and string.format("   |cffffd100Est. Deposit:|r %s", PF.Formatter.FormatMoney(opp.totalDepositRisk))
             or ""
         local profStr = PF.Formatter.FormatMoney(opp.totalProfit)
-        detailFrame.metricsText:SetText(string.format(
-            "|cffffd100Cost:|r %s   |cffffd100Net Rev:|r %s   |cffffd100AH Cut:|r %s%s\n|cff00ff00Total Profit:|r |cff00ff00%s|r (%d%% ROI)",
-            costStr, revStr, cutStr, depStr, profStr, opp.roiPercent or 0
-        ))
+        if opp._liveUnprofitable then
+            detailFrame.metricsText:SetText(string.format(
+                "|cffffd100Est. Cost:|r %s   |cffffd100Net Rev:|r %s   |cffffd100AH Cut:|r %s%s\n|cffff4444Live AH prices changed — this play is no longer profitable!|r",
+                costStr, revStr, cutStr, depStr
+            ))
+        else
+            detailFrame.metricsText:SetText(string.format(
+                "|cffffd100Cost:|r %s   |cffffd100Net Rev:|r %s   |cffffd100AH Cut:|r %s%s\n|cff00ff00Total Profit:|r |cff00ff00%s|r (%d%% ROI)",
+                costStr, revStr, cutStr, depStr, profStr, opp.roiPercent or 0
+            ))
+        end
     end
 
     if detailFrame.descText then
@@ -484,49 +660,141 @@ function PF.DetailWindow.RefreshIfShown()
         detailFrame.descText:SetText(explanation)
     end
 
-    local shopList = opp.shoppingList or {}
+    if PF.OpportunityEngine and PF.OpportunityEngine.ComputeLiveInventoryState then
+        PF.OpportunityEngine.ComputeLiveInventoryState(opp)
+    end
+
+    -- Build interleaved display rows: each raw shopping item followed immediately
+    -- by any intermediate craft sub-step (e.g. Mithril Ore -> Mithril Bar) that it feeds.
+    local shopList = type(opp.shoppingList) == "table" and opp.shoppingList or {}
+    local steps = type(opp.intermediateSteps) == "table" and opp.intermediateSteps or {}
+    local lastShopIdxByItemId = {}
+    for idx, item in ipairs(shopList) do
+        if item and item.itemId then
+            lastShopIdxByItemId[item.itemId] = idx
+        end
+    end
+    local stepsAfterShopIdx = {}
+    local unattachedSteps = {}
+    for _, step in ipairs(steps) do
+        if type(step) == "table" and step.outputItemId then
+            local attachIdx = 0
+            if type(step.reagents) == "table" then
+                for _, subR in ipairs(step.reagents) do
+                    local sIdx = subR and subR.itemId and lastShopIdxByItemId[subR.itemId]
+                    if sIdx and sIdx > attachIdx then
+                        attachIdx = sIdx
+                    end
+                end
+            end
+            if attachIdx > 0 then
+                stepsAfterShopIdx[attachIdx] = stepsAfterShopIdx[attachIdx] or {}
+                table.insert(stepsAfterShopIdx[attachIdx], step)
+            else
+                table.insert(unattachedSteps, step)
+            end
+        end
+    end
+
+    local displayEntries = {}
+    for idx, item in ipairs(shopList) do
+        table.insert(displayEntries, { kind = "SHOP", item = item })
+        if stepsAfterShopIdx[idx] then
+            for _, step in ipairs(stepsAfterShopIdx[idx]) do
+                table.insert(displayEntries, { kind = "CRAFT", step = step })
+            end
+        end
+    end
+    for _, step in ipairs(unattachedSteps) do
+        table.insert(displayEntries, { kind = "CRAFT", step = step })
+    end
+
     for i = 1, MAX_SHOPPING_ROWS do
         local row = shoppingRows[i]
-        local item = shopList[i]
-        if item then
+        local entry = displayEntries[i]
+        if entry and entry.kind == "SHOP" then
+            local item = entry.item
             row._itemData = item
+            row._stepData = nil
+            row._rowKind = "SHOP"
             row:Show()
 
-            local liveInBags = PF.Formatter.GetInventoryCount(item.itemId, false)
-            local liveInBank = math.max(0, PF.Formatter.GetInventoryCount(item.itemId, true) - liveInBags)
-            item.haveInBags = liveInBags
-            item.haveInBank = liveInBank
-            item.remainingToBuy = math.max(0, item.totalQuantity - liveInBags)
+            local indentX = 0
+            if row.SetSize then row:SetSize(432, 54) end
+            if row.ClearAllPoints and row.SetPoint then
+                row:ClearAllPoints()
+                if i == 1 then
+                    row:SetPoint("TOPLEFT", detailFrame.shopHeader, "BOTTOMLEFT", indentX, -8)
+                else
+                    local prevRow = shoppingRows[i - 1]
+                    local prevIndent = (prevRow and prevRow._indentX) or 0
+                    row:SetPoint("TOPLEFT", prevRow, "BOTTOMLEFT", indentX - prevIndent, -6)
+                end
+            end
+            row._indentX = indentX
+            row._rowHeight = 60
+            SetRowBackgroundColor(row, 0.12, 0.13, 0.16, 0.90)
+
+            if row.itemBtn and row.itemBtn.SetWidth then row.itemBtn:SetWidth(268) end
+            if row.itemText and row.itemText.SetWidth then row.itemText:SetWidth(268) end
+            if row.statusText and row.statusText.SetWidth then row.statusText:SetWidth(268) end
+            if row.priceText and row.priceText.SetWidth then row.priceText:SetWidth(268) end
+
+            local liveInBags = item.haveInBags or PF.Formatter.GetInventoryCount(item.itemId, false)
+            local liveInBank = item.haveInBank or math.max(0, PF.Formatter.GetInventoryCount(item.itemId, true) - liveInBags)
+            local effectiveNeeded = item.effectiveQuantity or item.totalQuantity or 1
+            local remToBuy = (item.remainingToBuy ~= nil) and item.remainingToBuy or math.max(0, effectiveNeeded - liveInBags)
 
             local sourceTag = (item.source == "Vendor") and "|cff00ccff[Vendor]|r" or "|cffffaa00[AH]|r"
             if row.itemText then
                 row.itemText:SetText(string.format("%s %dx %s", sourceTag, item.totalQuantity, item.link))
             end
 
+            local satNote = ""
+            if type(item.satisfyingSteps) == "table" and #item.satisfyingSteps > 0 then
+                local s0 = item.satisfyingSteps[1]
+                satNote = string.format("%d / %d %s", s0.haveInBags, s0.totalQuantity, s0.outputName or "crafted")
+            end
+
             local invStatus
-            if liveInBags >= item.totalQuantity then
-                invStatus = string.format("|cff00ff00Ready: %d / %d|r", liveInBags, item.totalQuantity)
+            if item.fullySatisfiedByIntermediates then
+                if satNote ~= "" then
+                    invStatus = string.format("|cff00ff00Ready: Covered by %s|r", satNote)
+                else
+                    invStatus = "|cff00ff00Ready: Covered by crafted items in bags|r"
+                end
+            elseif remToBuy <= 0 then
+                if item.satisfiedByIntermediates and satNote ~= "" then
+                    invStatus = string.format("|cff00ff00Ready: %d / %d (%s)|r", liveInBags, effectiveNeeded, satNote)
+                else
+                    invStatus = string.format("|cff00ff00Ready: %d / %d|r", liveInBags, effectiveNeeded)
+                end
             else
                 local bankNote = (liveInBank > 0) and string.format(" (+%d bank)", liveInBank) or ""
-                invStatus = string.format("|cffffcc00Have: %d / %d%s — Buy %d|r", liveInBags, item.totalQuantity, bankNote, item.remainingToBuy)
+                if item.satisfiedByIntermediates and satNote ~= "" then
+                    invStatus = string.format("|cffffcc00Have: %d / %d%s — Buy %d (%s)|r", liveInBags, effectiveNeeded, bankNote, remToBuy, satNote)
+                else
+                    invStatus = string.format("|cffffcc00Have: %d / %d%s — Buy %d|r", liveInBags, effectiveNeeded, bankNote, remToBuy)
+                end
             end
 
             local priceInfo
             if item.source == "Vendor" then
                 priceInfo = string.format("|cffccccccVendor: %s ea (Total: %s)|r", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
+            elseif item._liveUnavailable then
+                priceInfo = "|cffff5555Live AH: Sold out / no buyout listings|r"
+            elseif item._liveMinUnitPrice and item.maxUnitPrice and item._liveMinUnitPrice > item.maxUnitPrice then
+                priceInfo = string.format("|cffff5555Live AH: %s ea (above max %s — unprofitable!)|r", PF.Formatter.FormatMoney(item._liveMinUnitPrice), PF.Formatter.FormatMoney(item.maxUnitPrice))
             elseif item.minUnitPrice ~= item.maxUnitPrice then
                 priceInfo = string.format("|cffccccccAvg %s (Max %s) | Total: %s|r", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.maxUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
             else
                 priceInfo = string.format("|cffccccccAH: %s ea (Total: %s)|r", PF.Formatter.FormatMoney(item.avgUnitPrice), PF.Formatter.FormatMoney(item.totalCost))
             end
 
-            if row.statusText then
-                row.statusText:SetText(invStatus)
-            end
-            if row.priceText then
-                row.priceText:SetText(priceInfo)
-            end
+            if row.statusText then row.statusText:SetText(invStatus) end
+            if row.priceText then row.priceText:SetText(priceInfo) end
 
+            if row.craftBtn then row.craftBtn:Hide() end
             if row.searchBtn then
                 if item.source == "Vendor" then
                     row.searchBtn:Hide()
@@ -535,13 +803,87 @@ function PF.DetailWindow.RefreshIfShown()
                     row.searchBtn:SetText("Open in AH")
                 end
             end
-
             if row.buyBtn then
+                row.buyBtn:Show()
                 local label = (PF.AHVerifier and PF.AHVerifier.GetBuyButtonLabel and PF.AHVerifier.GetBuyButtonLabel(item)) or "Buy Next"
                 row.buyBtn:SetText(label)
             end
+        elseif entry and entry.kind == "CRAFT" then
+            local step = entry.step
+            row._itemData = nil
+            row._stepData = step
+            row._rowKind = "CRAFT"
+            row:Show()
+
+            local indentX = 14
+            if row.SetSize then row:SetSize(418, 50) end
+            if row.ClearAllPoints and row.SetPoint then
+                row:ClearAllPoints()
+                if i == 1 then
+                    row:SetPoint("TOPLEFT", detailFrame.shopHeader, "BOTTOMLEFT", indentX, -8)
+                else
+                    local prevRow = shoppingRows[i - 1]
+                    local prevIndent = (prevRow and prevRow._indentX) or 0
+                    row:SetPoint("TOPLEFT", prevRow, "BOTTOMLEFT", indentX - prevIndent, -3)
+                end
+            end
+            row._indentX = indentX
+            row._rowHeight = 53
+            SetRowBackgroundColor(row, 0.09, 0.14, 0.20, 0.92)
+
+            if row.itemBtn and row.itemBtn.SetWidth then row.itemBtn:SetWidth(254) end
+            if row.itemText and row.itemText.SetWidth then row.itemText:SetWidth(254) end
+            if row.statusText and row.statusText.SetWidth then row.statusText:SetWidth(254) end
+            if row.priceText and row.priceText.SetWidth then row.priceText:SetWidth(254) end
+
+            local stepTotal = step.totalQuantity or ((step.countPerUnit or 1) * (opp.quantity or 1))
+            local stepBags = step.haveInBags or 0
+            local stepBank = step.haveInBank or 0
+            local remCraft = step.remainingToCraft or math.max(0, stepTotal - stepBags)
+            local outputDisplay = step.outputLink or step.outputName or step.recipeName or "Crafted Item"
+
+            if row.itemText then
+                row.itemText:SetText(string.format("|cff00ccff-> [Craft]|r %dx %s", stepTotal, outputDisplay))
+            end
+
+            local craftStatus
+            if remCraft <= 0 then
+                craftStatus = string.format("|cff00ff00Ready: %d / %d|r", stepBags, stepTotal)
+            elseif step.matsReadyInBags then
+                craftStatus = string.format("|cff00e5ffHave: %d / %d — Craft %d (mats ready!)|r", stepBags, stepTotal, remCraft)
+            elseif (step.craftableNow or 0) > 0 then
+                craftStatus = string.format("|cffffcc00Have: %d / %d — Craft %d (%d ready now)|r", stepBags, stepTotal, remCraft, step.craftableNow)
+            else
+                local bankNote = (stepBank > 0) and string.format(" (+%d bank)", stepBank) or ""
+                craftStatus = string.format("|cffffcc00Have: %d / %d%s — Craft %d|r", stepBags, stepTotal, bankNote, remCraft)
+            end
+
+            local reqParts = {}
+            if type(step.reagents) == "table" then
+                local batchesForInfo = (remCraft > 0) and (step.remainingBatches or 0) or math.ceil(stepTotal / math.max(1, step.avgMade or 1))
+                for _, sr in ipairs(step.reagents) do
+                    local qty = math.max(1, batchesForInfo * (sr.countPerBatch or sr.count or 1))
+                    table.insert(reqParts, string.format("%dx %s", qty, sr.name or ("Item #" .. tostring(sr.itemId))))
+                end
+            end
+            local profLabel = step.profession or "Crafting"
+            local subDesc = (#reqParts > 0)
+                and string.format("|cffaaaaaaUses: %s (%s)|r", table.concat(reqParts, ", "), profLabel)
+                or string.format("|cffaaaaaaStep: %s (%s)|r", step.recipeName or outputDisplay, profLabel)
+
+            if row.statusText then row.statusText:SetText(craftStatus) end
+            if row.priceText then row.priceText:SetText(subDesc) end
+
+            if row.searchBtn then row.searchBtn:Hide() end
+            if row.buyBtn then row.buyBtn:Hide() end
+            if row.craftBtn then
+                row.craftBtn:Show()
+                row.craftBtn:SetText(string.format("Open %s", profLabel))
+            end
         else
             row._itemData = nil
+            row._stepData = nil
+            row._rowKind = nil
             row:Hide()
         end
     end

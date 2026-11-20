@@ -24,6 +24,10 @@ local pendingBrowseResolve = nil -- { itemId, itemName, desiredQuantity }
 -- Active / Pending Default AH UI Purchase State
 local activeSearchItemId = nil
 local activeSearchItemKey = nil
+local activeSearchDesiredQty = 1
+local openSearchToken = 0
+local pendingOpenItemKey = nil      -- { itemId, itemKey, itemKeyInfo, desiredQuantity, token }
+local pendingSearchCheck = nil      -- { itemId, itemKey, itemKeyInfo, desiredQuantity, token, retries }
 local pendingCommodityConfirm = nil -- { itemId, itemName, quantity, unitPrice, totalPrice, maxUnitPrice }
 local purchasedAuctionIds = {}      -- [auctionID] = true (prevents bidding on the same auctionID twice)
 
@@ -235,29 +239,46 @@ local function IsBuyoutOnlyEnabled()
     return true
 end
 
+local function IsItemLiveVerified(itemId, verifiedItemMap)
+    if not itemId or itemId <= 0 then return true end
+    if verifiedItemMap and verifiedItemMap[itemId] == true then
+        return true
+    end
+    local ob = Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[itemId]
+    if ob and not ob.unavailable and type(ob.listings) == "table" and #ob.listings > 0 and (time() - (ob.timestamp or 0)) <= 600 then
+        return true
+    end
+    return false
+end
+
 local function MarkVerifiedOpportunities(opportunities, verifiedItemMap)
     if type(opportunities) ~= "table" then return end
-    local settings = (Profitable_DB and Profitable_DB.settings) or {}
-    local feedSkipAge = settings.marketFeedVerifySkipSeconds or 7200
-    local feedFreshWindow = PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh(feedSkipAge)
     for _, opp in ipairs(opportunities) do
         local allVerified = true
         if opp.shoppingList then
             for _, shop in ipairs(opp.shoppingList) do
                 if shop.source == "AH" then
-                    local ob = Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[shop.itemId]
-                    local isFresh = ob and (time() - (ob.timestamp or 0)) <= 600
-                    local hasFeed = feedFreshWindow and PF.MarketFeed.GetItemData and (PF.MarketFeed.GetItemData(shop.itemId) ~= nil)
-                    if not isFresh and not hasFeed and not (verifiedItemMap and verifiedItemMap[shop.itemId]) then
+                    if not IsItemLiveVerified(shop.itemId, verifiedItemMap) then
                         allVerified = false
                         break
                     end
                 end
             end
         end
+        if allVerified and opp.actionType == "CRAFT_AH" and opp.itemId then
+            if not IsItemLiveVerified(opp.itemId, verifiedItemMap) then
+                allVerified = false
+            end
+        elseif allVerified and (opp.actionType == "BUY_DE" or opp.actionType == "CRAFT_DE") and opp.targetMatId then
+            if not IsItemLiveVerified(opp.targetMatId, verifiedItemMap) then
+                allVerified = false
+            end
+        end
         opp.verified = allVerified
     end
 end
+
+PF.AHVerifier.MarkVerifiedOpportunities = MarkVerifiedOpportunities
 
 local verifiedInSession = {}
 local activeQueuedIds = {}
@@ -268,11 +289,17 @@ local function EnqueueVerificationItem(itemId, itemName)
     if not itemId or itemId <= 0 or activeQueuedIds[itemId] then return end
     if PF.VendorDatabase.IsVendorReagent(itemId) then return end
     activeQueuedIds[itemId] = true
-    if not activeForceLiveVerify then
-        local feedHasItem = activeFeedFreshWindow and PF.MarketFeed.GetItemData and (PF.MarketFeed.GetItemData(itemId) ~= nil)
-        if feedHasItem then
-            verifiedInSession[itemId] = true
-            return
+    if not activeForceLiveVerify and activeFeedFreshWindow then
+        local feedData = PF.MarketFeed and PF.MarketFeed.GetItemData and PF.MarketFeed.GetItemData(itemId)
+        if feedData then
+            -- Only allow opt-in MarketFeed skip if MarketFeed is actually the active price source
+            -- (not overridden by a newer single-price PCF_DB scan/sniff entry!), and NEVER mark
+            -- an unverified offline feed item in verifiedInSession.
+            local pcfEntry = (_G.PCF_DB and type(_G.PCF_DB.prices) == "table") and _G.PCF_DB.prices[itemId] or nil
+            local pcfTs = (pcfEntry and pcfEntry.minBuyout and pcfEntry.minBuyout > 0 and pcfEntry.lastUpdated) or 0
+            if (feedData.timestamp or 0) >= pcfTs then
+                return
+            end
         end
     end
     local meta = PF.VendorDatabase.GetItemMetadata(itemId)
@@ -312,13 +339,14 @@ local function EnqueuePlayList(list)
 end
 
 function PF.AHVerifier.RecalculateFromCache()
-    local topPlays, _, honorableMentions = PF.OpportunityEngine.FindTopOpportunities()
+    local topPlays, allEvaluated, honorableMentions = PF.OpportunityEngine.FindTopOpportunities()
     MarkVerifiedOpportunities(topPlays, verifiedInSession)
     MarkVerifiedOpportunities(honorableMentions, verifiedInSession)
+    MarkVerifiedOpportunities(allEvaluated, verifiedInSession)
     Profitable_DB = Profitable_DB or {}
     Profitable_DB.lastTopPlays = topPlays
     Profitable_DB.lastHonorableMentions = honorableMentions
-    return topPlays, honorableMentions
+    return topPlays, honorableMentions, allEvaluated
 end
 
 local function FinalizeRun(reason)
@@ -452,7 +480,10 @@ local function CollectModernCommodityResults(itemId)
     for i = 1, num do
         local okRow, row = pcall(_G.C_AuctionHouse.GetCommoditySearchResultInfo, itemId, i)
         if okRow and type(row) == "table" and row.unitPrice and row.unitPrice > 0 and row.quantity and row.quantity > 0 then
-            table.insert(listings, { unitPrice = math.floor(row.unitPrice), quantity = math.floor(row.quantity) })
+            local availQty = math.floor(row.quantity) - math.floor(tonumber(row.numOwnerItems) or 0)
+            if availQty > 0 then
+                table.insert(listings, { unitPrice = math.floor(row.unitPrice), quantity = availQty })
+            end
         end
     end
     if #listings > 0 then
@@ -587,6 +618,10 @@ ScheduleNextVerification = function(delay)
                 end)
                 C_Timer.After(2.5, function()
                     if isRunning and runToken == myToken and currentQueryItem == target then
+                        if target and target.itemId then
+                            itemKeyCallbacks[target.itemId] = nil
+                            ClearPendingItemKeyWatchers()
+                        end
                         ScheduleNextVerification(0.05)
                     end
                 end)
@@ -594,8 +629,7 @@ ScheduleNextVerification = function(delay)
             end
         end
 
-        verifiedInSession[target.itemId] = true
-        ScheduleNextVerification(0.01)
+        FinalizeRun("AH_CLOSED")
     end)
 end
 
@@ -626,12 +660,16 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
     verifyQueue = {}
     verifyIndex = 0
     currentQueryItem = nil
+    pendingOpenItemKey = nil
+    pendingSearchCheck = nil
 
     local settings = (Profitable_DB and Profitable_DB.settings) or {}
     local candidateCount = settings.verifyCandidateCount or 10
     local forceLiveVerify = (callbacks.forceLiveVerify == true)
-    local feedSkipAge = settings.marketFeedVerifySkipSeconds or 7200
-    local feedFreshWindow = PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh(feedSkipAge)
+    local feedSkipAge = tonumber(settings.marketFeedVerifySkipSeconds) or 0
+    local feedFreshWindow = (feedSkipAge > 0)
+        and PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh(feedSkipAge)
+        or false
 
     local initialTop, _, initialHM = PF.OpportunityEngine.FindTopOpportunities(nil, nil, candidateCount)
     local top5, _, hm = PF.OpportunityEngine.FindTopOpportunities()
@@ -647,9 +685,6 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
     EnqueuePlayList(initialHM)
 
     if #verifyQueue == 0 or not PF.AHVerifier.IsAuctionHouseOpen() then
-        for _, q in ipairs(verifyQueue) do
-            verifiedInSession[q.itemId] = true
-        end
         FinalizeRun("COMPLETE")
         return Profitable_DB.lastTopPlays
     end
@@ -659,15 +694,17 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
     return Profitable_DB.lastTopPlays
 end
 
--- Sets the quantity in the default Blizzard AuctionHouseFrame.CommoditiesBuyFrame
-local function SetDefaultCommoditiesUIQuantity(desiredQuantity)
+-- Sets the quantity in the default Blizzard AuctionHouseFrame.CommoditiesBuyFrame.
+-- Only invoke OnQuantityChanged once commodity listings are loaded so we never interfere
+-- with an in-flight search query while CommoditiesBuyFrame is still "Searching...".
+local function SetDefaultCommoditiesUIQuantity(desiredQuantity, triggerChangeHandler)
     local ahFrame = _G.AuctionHouseFrame
     local commFrame = ahFrame and ahFrame.CommoditiesBuyFrame
     if not commFrame or not commFrame.BuyDisplay then return end
 
     local qInput = commFrame.BuyDisplay.QuantityInput
     if qInput then
-        if qInput.SetQuantity then
+        if qInput.SetQuantity and triggerChangeHandler then
             pcall(qInput.SetQuantity, qInput, desiredQuantity)
         elseif qInput.InputBox then
             if qInput.InputBox.SetNumber then
@@ -675,40 +712,154 @@ local function SetDefaultCommoditiesUIQuantity(desiredQuantity)
             elseif qInput.InputBox.SetText then
                 pcall(qInput.InputBox.SetText, qInput.InputBox, tostring(desiredQuantity))
             end
+        elseif qInput.SetQuantity then
+            pcall(qInput.SetQuantity, qInput, desiredQuantity)
         end
     end
-    if commFrame.OnQuantityChanged then
-        pcall(commFrame.OnQuantityChanged, commFrame)
-    elseif commFrame.BuyDisplay.OnQuantityChanged then
-        pcall(commFrame.BuyDisplay.OnQuantityChanged, commFrame.BuyDisplay)
+    if triggerChangeHandler then
+        if commFrame.OnQuantityChanged then
+            pcall(commFrame.OnQuantityChanged, commFrame)
+        elseif commFrame.BuyDisplay.OnQuantityChanged then
+            pcall(commFrame.BuyDisplay.OnQuantityChanged, commFrame.BuyDisplay)
+        end
     end
 end
 
-local function OpenItemKeyInDefaultAH(itemId, itemKey, itemKeyInfo, desiredQuantity)
+local OpenItemKeyInDefaultAH
+local ScheduleSearchStallWatchdog
+
+local function FlushPendingOpenItemKey()
+    if not pendingOpenItemKey then return end
+    if isRunning or not PF.AHVerifier.IsAuctionHouseOpen() then
+        return
+    end
+    if _G.C_AuctionHouse and _G.C_AuctionHouse.IsThrottledMessageSystemReady and not _G.C_AuctionHouse.IsThrottledMessageSystemReady() then
+        return
+    end
+    local req = pendingOpenItemKey
+    pendingOpenItemKey = nil
+    if req.token ~= openSearchToken then
+        return
+    end
+    OpenItemKeyInDefaultAH(req.itemId, req.itemKey, req.itemKeyInfo, req.desiredQuantity, req.token)
+end
+
+ScheduleSearchStallWatchdog = function(checkRef, delaySeconds)
+    if not checkRef or not _G.C_Timer or not _G.C_Timer.After then return end
+    _G.C_Timer.After(delaySeconds or 1.0, function()
+        if isRunning or not pendingSearchCheck or pendingSearchCheck ~= checkRef or checkRef.token ~= openSearchToken then
+            return
+        end
+        if not PF.AHVerifier.IsAuctionHouseOpen() or not _G.C_AuctionHouse or not _G.C_AuctionHouse.SendSearchQuery then
+            pendingSearchCheck = nil
+            return
+        end
+        if _G.C_AuctionHouse.IsThrottledMessageSystemReady and not _G.C_AuctionHouse.IsThrottledMessageSystemReady() then
+            if checkRef.retries < 3 then
+                checkRef.retries = checkRef.retries + 1
+                ScheduleSearchStallWatchdog(checkRef, 0.35)
+            else
+                pendingSearchCheck = nil
+            end
+            return
+        end
+
+        -- Stall recovery: Blizzard's CommoditiesBuyFrame / ItemBuyFrame never received search results
+        -- (e.g. its initial internal query was dropped by throttle), so re-send the search query cleanly!
+        local sorts = PF.AHVerifier.GetAppropriateSorts(checkRef.itemKeyInfo)
+        local isItem = (checkRef.itemKeyInfo and checkRef.itemKeyInfo.isCommodity == false)
+        pcall(_G.C_AuctionHouse.SendSearchQuery, checkRef.itemKey, sorts, isItem)
+
+        checkRef.retries = (checkRef.retries or 0) + 1
+        if checkRef.retries < 2 then
+            ScheduleSearchStallWatchdog(checkRef, 1.5)
+        else
+            pendingSearchCheck = nil
+        end
+    end)
+end
+
+OpenItemKeyInDefaultAH = function(itemId, itemKey, itemKeyInfo, desiredQuantity, existingToken)
     if not _G.AuctionHouseFrame then return end
+
+    local myToken = existingToken
+    if not myToken then
+        openSearchToken = openSearchToken + 1
+        myToken = openSearchToken
+    end
+
     activeSearchItemId = itemId
     activeSearchItemKey = itemKey
+    activeSearchDesiredQty = desiredQuantity or 1
     knownItemKeys[itemId] = itemKey
 
+    -- Never send SelectBrowseResult / SendSearchQuery while the C_AuctionHouse throttle system is busy
+    -- (e.g. right after confirming a purchase or finishing another query), otherwise Blizzard's internal
+    -- search packet gets silently dropped and CommoditiesBuyFrame sits on "Searching..." indefinitely!
+    if _G.C_AuctionHouse and _G.C_AuctionHouse.IsThrottledMessageSystemReady and not _G.C_AuctionHouse.IsThrottledMessageSystemReady() then
+        pendingOpenItemKey = {
+            itemId = itemId,
+            itemKey = itemKey,
+            itemKeyInfo = itemKeyInfo,
+            desiredQuantity = desiredQuantity,
+            token = myToken,
+        }
+        SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+        if _G.C_Timer and _G.C_Timer.After then
+            _G.C_Timer.After(0.25, function()
+                if pendingOpenItemKey and pendingOpenItemKey.token == myToken then
+                    FlushPendingOpenItemKey()
+                end
+            end)
+        end
+        return
+    end
+
+    pendingOpenItemKey = nil
     local minPrice = (PF.OpportunityEngine and PF.OpportunityEngine.ResolveAHPrice and PF.OpportunityEngine.ResolveAHPrice(itemId)) or 0
 
-    -- SelectBrowseResult automatically switches AuctionHouseFrame into CommoditiesBuyFrame or ItemBuyFrame
-    -- AND sends the internal C_AuctionHouse.SendSearchQuery for that itemKey!
-    -- IMPORTANT: Do NOT call C_AuctionHouse.SendSearchQuery a second time if SelectBrowseResult exists,
-    -- because sending two throttled queries on the same tick causes C_AuctionHouse to drop the message!
-    if _G.AuctionHouseFrame.SelectBrowseResult then
-        pcall(_G.AuctionHouseFrame.SelectBrowseResult, _G.AuctionHouseFrame, {
+    local checkRef = {
+        itemId = itemId,
+        itemKey = itemKey,
+        itemKeyInfo = itemKeyInfo,
+        desiredQuantity = desiredQuantity,
+        token = myToken,
+        retries = 0,
+    }
+    pendingSearchCheck = checkRef
+
+    -- SelectBrowseResult switches AuctionHouseFrame into CommoditiesBuyFrame or ItemBuyFrame
+    -- AND sends the internal C_AuctionHouse.SendSearchQuery for that itemKey.
+    -- IMPORTANT:
+    -- 1. Do NOT wipe AuctionHouseFrame.displayMode = nil (doing so corrupts Blizzard's displayMode tracking
+    --    and can leave CommoditiesBuyFrame stuck on "Searching..."!).
+    -- 2. Do NOT call SendSearchQuery a second time on the same tick if SelectBrowseResult exists;
+    --    instead let our 1.0s stall watchdog recover automatically if no search result event arrives.
+    local ahFrame = _G.AuctionHouseFrame
+    local alreadyShowingSameCommodity = ahFrame.CommoditiesBuyFrame
+        and ahFrame.CommoditiesBuyFrame.IsShown and ahFrame.CommoditiesBuyFrame:IsShown()
+        and ahFrame.CommoditiesBuyFrame.BuyList
+        and ahFrame.CommoditiesBuyFrame.BuyList.itemID == itemId
+
+    if alreadyShowingSameCommodity and _G.C_AuctionHouse and _G.C_AuctionHouse.SendSearchQuery then
+        local sorts = PF.AHVerifier.GetAppropriateSorts(itemKeyInfo)
+        pcall(_G.C_AuctionHouse.SendSearchQuery, itemKey, sorts, false)
+        SetDefaultCommoditiesUIQuantity(desiredQuantity, false)
+    elseif ahFrame.SelectBrowseResult then
+        EnsureAuctionBuyViewOpen()
+        pcall(ahFrame.SelectBrowseResult, ahFrame, {
             itemKey = itemKey,
             minPrice = minPrice,
             totalQuantity = desiredQuantity,
         })
-        _G.AuctionHouseFrame.displayMode = nil
-        SetDefaultCommoditiesUIQuantity(desiredQuantity)
+        SetDefaultCommoditiesUIQuantity(desiredQuantity, false)
     elseif _G.C_AuctionHouse and _G.C_AuctionHouse.SendSearchQuery then
         local sorts = PF.AHVerifier.GetAppropriateSorts(itemKeyInfo)
         local isItem = (itemKeyInfo and itemKeyInfo.isCommodity == false)
         pcall(_G.C_AuctionHouse.SendSearchQuery, itemKey, sorts, isItem)
     end
+
+    ScheduleSearchStallWatchdog(checkRef, 0.8)
 end
 
 -- Navigates the Default WoW: Forever Auction House UI (AuctionHouseFrame) directly into
@@ -824,17 +975,20 @@ local function GetLoadedQualifyingCommodityQty(itemId, maxUnitPrice, neededQty, 
     for i = 1, num do
         local okRow, row = pcall(_G.C_AuctionHouse.GetCommoditySearchResultInfo, itemId, i)
         if okRow and type(row) == "table" and row.unitPrice and row.unitPrice > 0 and row.quantity and row.quantity > 0 then
-            totalAvailable = totalAvailable + row.quantity
-            if not maxUnitPrice or row.unitPrice <= maxUnitPrice then
-                local remNeeded = neededQty - buyQty
-                if remNeeded > 0 then
-                    local maxAffordable = (playerGold and playerGold > totalCost)
-                        and math.floor((playerGold - totalCost) / row.unitPrice)
-                        or row.quantity
-                    local take = math.min(remNeeded, row.quantity, maxAffordable)
-                    if take > 0 then
-                        buyQty = buyQty + take
-                        totalCost = totalCost + (take * row.unitPrice)
+            local availQty = math.floor(row.quantity) - math.floor(tonumber(row.numOwnerItems) or 0)
+            if availQty > 0 then
+                totalAvailable = totalAvailable + availQty
+                if not maxUnitPrice or row.unitPrice <= maxUnitPrice then
+                    local remNeeded = neededQty - buyQty
+                    if remNeeded > 0 then
+                        local maxAffordable = (playerGold and playerGold > totalCost)
+                            and math.floor((playerGold - totalCost) / row.unitPrice)
+                            or availQty
+                        local take = math.min(remNeeded, availQty, maxAffordable)
+                        if take > 0 then
+                            buyQty = buyQty + take
+                            totalCost = totalCost + (take * row.unitPrice)
+                        end
                     end
                 end
             end
@@ -912,10 +1066,17 @@ function PF.AHVerifier.OpenNextNeededItemInDefaultAH(opp)
     opp = opp or (Profitable_DB and Profitable_DB.activePlay)
     if not opp or type(opp.shoppingList) ~= "table" then return end
 
+    if PF.OpportunityEngine and PF.OpportunityEngine.ComputeLiveInventoryState then
+        PF.OpportunityEngine.ComputeLiveInventoryState(opp)
+    end
+
     for _, item in ipairs(opp.shoppingList) do
         if item.source == "AH" then
-            local inBags = PF.Formatter.GetInventoryCount(item.itemId, false)
-            local rem = math.max(0, (item.totalQuantity or 1) - inBags)
+            local rem = item.remainingToBuy
+            if rem == nil then
+                local inBags = PF.Formatter.GetInventoryCount(item.itemId, false)
+                rem = math.max(0, (item.totalQuantity or 1) - inBags)
+            end
             if rem > 0 then
                 PF.AHVerifier.SearchItemOnAH(item.itemId, item.name, item.link, rem)
                 return
@@ -928,7 +1089,13 @@ end
 function PF.AHVerifier.GetBuyButtonLabel(item)
     if not item then return "Buy Next" end
     if item.source == "Vendor" then
+        if item.remainingToBuy == 0 then
+            return "Ready"
+        end
         return "Buy Vendor"
+    end
+    if item.remainingToBuy == 0 then
+        return "Ready"
     end
     if pendingCommodityConfirm and pendingCommodityConfirm.itemId == item.itemId then
         return string.format("Confirm (%d)", pendingCommodityConfirm.quantity)
@@ -963,6 +1130,10 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
     if not itemId or itemId <= 0 then return false end
     neededQty = math.max(1, math.floor(tonumber(neededQty) or 1))
     local playerGold = PF.Formatter.GetPlayerGold()
+
+    -- Cancel any pending open/watchdog retry so it cannot collide with a purchase packet
+    pendingOpenItemKey = nil
+    pendingSearchCheck = nil
 
     -- 1. If Merchant window is open and sells this item, buy from Merchant
     if _G.GetMerchantNumItems and _G.GetMerchantItemInfo and _G.BuyMerchantItem then
@@ -1098,7 +1269,7 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
                 return false, 0, 0, "THROTTLED"
             end
 
-            SetDefaultCommoditiesUIQuantity(buyQty)
+            SetDefaultCommoditiesUIQuantity(buyQty, true)
 
             SafeRegisterEvent(verifierFrame, "COMMODITY_PRICE_UPDATED")
             SafeRegisterEvent(verifierFrame, "COMMODITY_PRICE_UNAVAILABLE")
@@ -1193,12 +1364,18 @@ function PF.AHVerifier.Init()
 
     SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
     SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
+    SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
     SafeRegisterEvent(verifierFrame, "COMMODITY_SEARCH_RESULTS_UPDATED")
     SafeRegisterEvent(verifierFrame, "ITEM_SEARCH_RESULTS_UPDATED")
 
     verifierFrame:SetScript("OnEvent", function(_, event, arg1, arg2)
         if event == "ITEM_KEY_ITEM_INFO_RECEIVED" then
             PollPendingItemKeys()
+            return
+        end
+
+        if event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" then
+            FlushPendingOpenItemKey()
             return
         end
 
@@ -1255,8 +1432,16 @@ function PF.AHVerifier.Init()
             if event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
                 local itemId = tonumber(arg1) or activeSearchItemId
                 if itemId then
+                    if pendingSearchCheck and pendingSearchCheck.itemId == itemId then
+                        pendingSearchCheck = nil
+                    end
                     CollectModernCommodityResults(itemId)
-                    if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
+                    if itemId == activeSearchItemId and activeSearchDesiredQty and activeSearchDesiredQty > 0 then
+                        SetDefaultCommoditiesUIQuantity(activeSearchDesiredQty, true)
+                    end
+                    if PF.DetailWindow and PF.DetailWindow.RevalidateActiveOpportunity then
+                        PF.DetailWindow.RevalidateActiveOpportunity(itemId)
+                    elseif PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
                         PF.DetailWindow.RefreshIfShown()
                     end
                 end
@@ -1264,8 +1449,13 @@ function PF.AHVerifier.Init()
                 local itemKey = type(arg1) == "table" and arg1 or nil
                 local itemId = (itemKey and itemKey.itemID) or activeSearchItemId
                 if itemId then
+                    if pendingSearchCheck and pendingSearchCheck.itemId == itemId then
+                        pendingSearchCheck = nil
+                    end
                     CollectModernItemResults(itemId, itemKey)
-                    if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
+                    if PF.DetailWindow and PF.DetailWindow.RevalidateActiveOpportunity then
+                        PF.DetailWindow.RevalidateActiveOpportunity(itemId)
+                    elseif PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
                         PF.DetailWindow.RefreshIfShown()
                     end
                 end
@@ -1283,7 +1473,8 @@ function PF.AHVerifier.Init()
             currentQueryItem = nil
             ScheduleNextVerification(0.10)
         elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
-            if not arg1 or arg1 == target.itemId then
+            local updatedId = tonumber(arg1)
+            if not updatedId or updatedId == target.itemId then
                 CollectModernCommodityResults(target.itemId)
                 currentQueryItem = nil
                 ScheduleNextVerification(0.10)
