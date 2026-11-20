@@ -515,14 +515,17 @@ local function CollectModernItemResults(itemId, itemKey)
     local listings = {}
     for i = 1, num do
         local okRow, row = pcall(_G.C_AuctionHouse.GetItemSearchResultInfo, itemKey, i)
-        if okRow and type(row) == "table" then
+        if okRow and type(row) == "table" and not row.containsOwnerItem and not row.containsAccountItem then
             local buyout = (row.buyoutAmount and row.buyoutAmount > 0) and row.buyoutAmount or nil
             if not buyout and not buyoutOnly then
                 buyout = row.bidAmount or row.minBid
             end
-            local qty = (row.quantity and row.quantity > 0) and row.quantity or 1
+            local qty = (row.quantity and row.quantity > 0) and math.floor(row.quantity) or 1
             if buyout and buyout > 0 then
-                local unitPrice = math.floor(buyout / qty)
+                -- In C_AuctionHouse.GetItemSearchResultInfo (non-commodity items), buyoutAmount is
+                -- ALREADY the per-item buyout price for 1 auction, while quantity is the number of
+                -- identical single-item auctions collapsed at that price (do NOT divide buyout by qty!).
+                local unitPrice = math.floor(buyout)
                 if unitPrice > 0 then
                     table.insert(listings, { unitPrice = unitPrice, quantity = qty })
                 end
@@ -1043,9 +1046,8 @@ local function GetLoadedQualifyingItemAuction(itemId, maxUnitPrice, playerGold)
         if okRow and type(row) == "table" and not row.containsOwnerItem and not row.containsAccountItem then
             if not row.auctionID or not purchasedAuctionIds[row.auctionID] then
                 local buyout = row.buyoutAmount
-                local qty = (row.quantity and row.quantity > 0) and row.quantity or 1
                 if buyout and buyout > 0 and (not playerGold or buyout <= playerGold) then
-                    local unitPrice = math.floor(buyout / qty)
+                    local unitPrice = math.floor(buyout)
                     if not maxUnitPrice or unitPrice <= maxUnitPrice then
                         if not bestUnitPrice or unitPrice < bestUnitPrice then
                             bestUnitPrice = unitPrice
@@ -1330,7 +1332,7 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
             if _G.C_AuctionHouse.PlaceBid then
                 purchasedAuctionIds[bestAuction.auctionID] = true
                 pcall(_G.C_AuctionHouse.PlaceBid, bestAuction.auctionID, bestAuction.buyoutAmount)
-                local qty = (bestAuction.quantity and bestAuction.quantity > 0) and bestAuction.quantity or 1
+                local qty = 1
                 print(string.format(
                     "|cff00ff88[Profitable]|r Buying %dx [%s] (auction #%s) for %s!",
                     qty,

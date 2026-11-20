@@ -1131,7 +1131,7 @@ do
     local origMarketFeed = _G.Profitable_MarketFeed
     local origGetNumTradeSkills = _G.GetNumTradeSkills
 
-    -- 21A. Config v1 -> v2 migration resets old default marketFeedVerifySkipSeconds = 7200 to 0
+    -- 21A. Config v1 -> v3 migration resets old default marketFeedVerifySkipSeconds = 7200 to 0
     local legacyV1DB = {
         version = 1,
         settings = {
@@ -1139,7 +1139,7 @@ do
         },
     }
     _G.PF.LoadConfig(legacyV1DB)
-    Assert(legacyV1DB.version == 2 and legacyV1DB.settings.marketFeedVerifySkipSeconds == 0, "v1 -> v2 migration resets legacy marketFeedVerifySkipSeconds (7200 -> 0)")
+    Assert(legacyV1DB.version == 3 and legacyV1DB.settings.marketFeedVerifySkipSeconds == 0, "v1 -> v3 migration resets legacy marketFeedVerifySkipSeconds (7200 -> 0)")
 
     -- 21B. Modern C_TradeSkillUI per-recipe profession resolution (immune to window-switch race conditions)
     _G.GetNumTradeSkills = function() return 0 end -- Force modern C_TradeSkillUI path
@@ -1576,6 +1576,135 @@ do
     _G.AuctionHouseFrame = origAHFrame
     _G.AuctionFrame = origAuctionFrame
     _G.GetNumTradeSkills = origGetNumTradeSkills
+end
+
+-- 23. Regression Tests: Collapsed Non-Commodity C_AuctionHouse.GetItemSearchResultInfo Rows (Linen Reagent Bag 253664)
+do
+    local origCAH = _G.C_AuctionHouse
+    local origAHFrame = _G.AuctionHouseFrame
+    local origAuctionFrame = _G.AuctionFrame
+    local origDB = _G.Profitable_DB
+
+    -- 23A. v2 -> v3 migration purges tainted non-commodity orderBookCache and PCF Sniff / Profitable Live entries
+    _G.PCF_DB.prices[253664] = { minBuyout = 18, minBid = 18, count = 129, lastUpdated = math.floor(Mock.currentTime), source = "Profitable Live" }
+    _G.PCF_DB.prices[2589]   = { minBuyout = 15, minBid = 15, count = 500, lastUpdated = math.floor(Mock.currentTime), source = "PCF Full Scan" }
+    local legacyV2DB = {
+        version = 2,
+        orderBookCache = {
+            [253664] = {
+                timestamp = math.floor(Mock.currentTime),
+                listings = { { unitPrice = 18, quantity = 43 } },
+            },
+        },
+        embeddedPCF = {
+            prices = {
+                [253664] = { minBuyout = 18, minBid = 18, count = 129, lastUpdated = math.floor(Mock.currentTime), source = "PCF Sniff" },
+            },
+        },
+        lastTopPlays = { { id = "VENDOR:253664", itemId = 253664 } },
+        activePlay = { id = "VENDOR:253664", itemId = 253664 },
+    }
+    _G.PF.LoadConfig(legacyV2DB)
+    Assert(legacyV2DB.version == 3, "v2 -> v3 migration upgrades config version to 3")
+    Assert(next(legacyV2DB.orderBookCache) == nil, "v2 -> v3 migration flushes poisoned orderBookCache")
+    Assert(_G.PCF_DB.prices[253664] == nil and legacyV2DB.embeddedPCF.prices[253664] == nil, "v2 -> v3 migration purges tainted PCF Sniff / Profitable Live entries")
+    Assert(_G.PCF_DB.prices[2589] and _G.PCF_DB.prices[2589].minBuyout == 15, "v2 -> v3 migration preserves intact PCF Full Scan prices")
+    Assert(#legacyV2DB.lastTopPlays == 0 and legacyV2DB.activePlay == nil, "v2 -> v3 migration clears stale lastTopPlays and activePlay")
+    _G.Profitable_DB = origDB
+    _G.PF.LoadConfig(origDB)
+
+    -- 23B. Collapsed non-commodity rows in C_AuctionHouse.GetItemSearchResultInfo (Linen Reagent Bag: 253664)
+    -- In WoW's C_AuctionHouse API, non-commodity items collapse identical 1-item auctions into a single row where
+    -- buyoutAmount is the per-item buyout (7s 77c = 777c) and quantity is the count of collapsed auctions (43).
+    _G.Profitable_DB.itemCache[253664] = {
+        name = "Linen Reagent Bag",
+        link = "|cffffffff|Hitem:253664:0:0:0|h[Linen Reagent Bag]|h|r",
+        quality = 1,
+        itemLevel = 5,
+        classID = 1,
+        subClassID = 1,
+        invType = "INVTYPE_BAG",
+        vendorSell = 200, -- 2s vendor sell price
+    }
+
+    local collapsedBagRows = {
+        { auctionID = 9001, buyoutAmount = 776,     minBid = 0,   quantity = 7  }, -- 7x @ 7s 76c each (NOT 1s 10c!)
+        { auctionID = 9002, buyoutAmount = 777,     minBid = 0,   quantity = 43 }, -- 43x @ 7s 77c each (NOT 18c!)
+        { auctionID = 9003, buyoutAmount = 800,     minBid = 0,   quantity = 7  }, -- 7x @ 8s 00c each (NOT 1s 14c!)
+        { auctionID = 9004, buyoutAmount = 850,     minBid = 0,   quantity = 17 }, -- 17x @ 8s 50c each (NOT 50c!)
+        { auctionID = 9005, buyoutAmount = 900,     minBid = 0,   quantity = 12 }, -- 12x @ 9s 00c each (NOT 75c!)
+        { auctionID = 9006, buyoutAmount = 949,     minBid = 0,   quantity = 1  }, -- 1x @ 9s 49c
+        { auctionID = 9007, buyoutAmount = 950,     minBid = 0,   quantity = 13 }, -- 13x @ 9s 50c each (NOT 73c!)
+        { auctionID = 9008, buyoutAmount = 999,     minBid = 0,   quantity = 27 }, -- 27x @ 9s 99c each (NOT 37c!)
+        { auctionID = 9009, buyoutAmount = 700640,  minBid = 640, quantity = 1  }, -- 1x @ 70g 6s 40c (bid 6s 40c)
+        { auctionID = 9010, buyoutAmount = 1000539, minBid = 445, quantity = 1  }, -- 1x @ 100g 5s 39c (bid 4s 45c)
+    }
+
+    _G.AuctionFrame = nil
+    _G.AuctionHouseFrame = _G.CreateFrame("Frame", "AuctionHouseFrame", _G.UIParent)
+    _G.AuctionHouseFrame:Show()
+    local placedBids23 = {}
+    _G.C_AuctionHouse = {
+        MakeItemKey = function(id) return { itemID = id, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 } end,
+        GetItemKeyInfo = function(key) return { itemID = key.itemID, isCommodity = false } end,
+        IsThrottledMessageSystemReady = function() return true end,
+        GetNumItemSearchResults = function(itemKey)
+            if type(itemKey) == "table" and itemKey.itemID == 253664 then
+                return #collapsedBagRows
+            end
+            return 0
+        end,
+        GetItemSearchResultInfo = function(itemKey, index)
+            if type(itemKey) == "table" and itemKey.itemID == 253664 then
+                return collapsedBagRows[index]
+            end
+            return nil
+        end,
+        PlaceBid = function(auctionID, buyoutAmount)
+            table.insert(placedBids23, { auctionID = auctionID, buyoutAmount = buyoutAmount })
+        end,
+    }
+
+    -- Verify PCF.Scanner.SniffItemSearchResults records unit buyout 776c (7s 76c) and count 129, NEVER 777/43 = 18c
+    local sniffed23 = _G.PCF.Scanner.SniffItemSearchResults({ itemID = 253664 })
+    Assert(sniffed23 == 1, "PCF.Scanner.SniffItemSearchResults processes Linen Reagent Bag search results")
+    Assert(
+        _G.PCF_DB.prices[253664] and _G.PCF_DB.prices[253664].minBuyout == 776 and _G.PCF_DB.prices[253664].count == 129,
+        "PCF.Scanner.SniffItemSearchResults records 7s 76c (776c) unit buyout and 129 total count for collapsed rows (never 18c)"
+    )
+
+    -- Verify PF.AHVerifier ITEM_SEARCH_RESULTS_UPDATED records unitPrice = 776c (qty 7) and updates PCF_DB
+    _G.Profitable_DB.orderBookCache = {}
+    _G.PF.AHVerifier.frame:Trigger("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 253664 })
+    local bagBook = _G.Profitable_DB.orderBookCache[253664]
+    Assert(bagBook ~= nil and type(bagBook.listings) == "table" and #bagBook.listings == 10, "AHVerifier records all 10 listing tiers for Linen Reagent Bag")
+    Assert(
+        bagBook.listings[1].unitPrice == 776 and bagBook.listings[1].quantity == 7,
+        "Cheapest Linen Reagent Bag tier is 7x @ 7s 76c (776c), never dividing 777/43 = 18c"
+    )
+    Assert(
+        bagBook.listings[2].unitPrice == 777 and bagBook.listings[2].quantity == 43,
+        "Second Linen Reagent Bag tier is 43x @ 7s 77c (777c)"
+    )
+
+    -- Verify OpportunityEngine never suggests vendoring Linen Reagent Bag (7s 76c AH > 2s vendor sell)
+    local top23 = _G.PF.OpportunityEngine.FindTopOpportunities(87207)
+    local foundBagVendorPlay = false
+    for _, opp in ipairs(top23) do
+        if opp.itemId == 253664 then
+            foundBagVendorPlay = true
+        end
+    end
+    Assert(foundBagVendorPlay == false, "Linen Reagent Bag is NOT suggested as a Vendor play when AH buyout is 7s 76c+ vs 2s vendor sell")
+
+    -- Verify BuyNextCheapListing refuses to purchase when maxUnitPrice is 200c (2s) and cheapest AH listing is 776c (7s 76c)
+    local bought23, _, _, status23 = _G.PF.AHVerifier.BuyNextCheapListing(253664, "Linen Reagent Bag", 200, 1)
+    Assert(bought23 == false and status23 == "NO_CHEAP_LISTING" and #placedBids23 == 0, "BuyNextCheapListing refuses to buy 7s 76c Linen Reagent Bag when max profitable price is 2s")
+
+    -- Restore globals
+    _G.C_AuctionHouse = origCAH
+    _G.AuctionHouseFrame = origAHFrame
+    _G.AuctionFrame = origAuctionFrame
 end
 
 print("\nAll Profitable test assertions passed successfully!")

@@ -23,7 +23,7 @@ Profitable_DB = Profitable_DB or {}
 _G.Profitable_DB = Profitable_DB
 
 local defaultConfig = {
-    version = 2,
+    version = 3,
     settings = {
         enabled = true,
         ahCutRate = 0.05,                        -- Standard 5% faction AH cut (auto-switches to 15% at Neutral AH)
@@ -232,7 +232,27 @@ function PF.LoadConfig(customDB)
         if Profitable_DB.settings and Profitable_DB.settings.marketFeedVerifySkipSeconds == 7200 then
             Profitable_DB.settings.marketFeedVerifySkipSeconds = 0
         end
-        Profitable_DB.version = 2
+    end
+
+    -- v3 migration: flush orderBookCache and any sniff/live-verify prices that may have divided
+    -- collapsed non-commodity C_AuctionHouse.GetItemSearchResultInfo buyouts by quantity
+    if prevVersion > 0 and prevVersion < 3 then
+        local function PurgeTaintedSniffPrices(dbTable)
+            if type(dbTable) == "table" and type(dbTable.prices) == "table" then
+                for itemId, entry in pairs(dbTable.prices) do
+                    if type(entry) == "table" and (entry.source == "Profitable Live" or entry.source == "PCF Sniff") then
+                        dbTable.prices[itemId] = nil
+                    end
+                end
+            end
+        end
+        PurgeTaintedSniffPrices(_G.PCF_DB)
+        PurgeTaintedSniffPrices(Profitable_DB.embeddedPCF)
+        Profitable_DB.orderBookCache = {}
+        Profitable_DB.lastTopPlays = {}
+        Profitable_DB.lastHonorableMentions = {}
+        Profitable_DB.activePlay = nil
+        Profitable_DB.version = 3
     end
 
     return Profitable_DB
