@@ -1004,14 +1004,23 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
     local allowCraftPlays = (settings.showCraftPlays ~= false)
     local allowDEPlays = (settings.assumeCanDisenchant ~= false)
 
+    local exitPriceCache = {}
     local resolveExitUnit = function(id)
-        local rawPrice = PF.OpportunityEngine.ResolveAHPrice(id)
-        if not rawPrice then return nil end
-        if PF.MarketFeed and PF.MarketFeed.GetExitPrice then
-            local effective = PF.MarketFeed.GetExitPrice(id, rawPrice)
-            return effective
+        local cached = exitPriceCache[id]
+        if cached ~= nil then
+            return cached ~= false and cached or nil
         end
-        return rawPrice
+        local rawPrice = PF.OpportunityEngine.ResolveAHPrice(id)
+        if not rawPrice then
+            exitPriceCache[id] = false
+            return nil
+        end
+        local effective = rawPrice
+        if PF.MarketFeed and PF.MarketFeed.GetExitPrice then
+            effective = PF.MarketFeed.GetExitPrice(id, rawPrice)
+        end
+        exitPriceCache[id] = effective or false
+        return effective
     end
 
     local FindDESpikeInfo = function(deEval)
@@ -1042,9 +1051,16 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
     for itemId in pairs(candidateItemIds) do
         local minBuyout = PF.OpportunityEngine.ResolveAHPrice(itemId)
         if minBuyout and minBuyout > 0 then
-            local meta = PF.VendorDatabase.GetItemMetadata(itemId)
+            local meta = PF.VendorDatabase.GetItemMetadata(itemId, nil, true)
             local itemName = (meta and meta.name) or string.format("Item #%d", itemId)
-            local vendorSell = PF.VendorDatabase.GetVendorSellPrice(itemId)
+            local vendorSell = nil
+            if meta then
+                if type(meta.vendorSell) == "number" and meta.vendorSell > 0 then
+                    vendorSell = meta.vendorSell
+                end
+            else
+                vendorSell = PF.VendorDatabase.GetVendorSellPrice(itemId)
+            end
 
             -- Strategy A: Direct AH Buy -> Vendor
             if allowVendorPlays and vendorSell and vendorSell > minBuyout then
@@ -1064,28 +1080,32 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                 })
             end
 
-            -- Strategy B: Direct AH Buy -> Disenchant
-            if allowDEPlays and PF.DisenchantDatabase.CanDisenchant(itemId) then
-                local deEval = PF.DisenchantDatabase.EvaluateDisenchant(itemId, nil, resolveExitUnit, ahCut)
-                if deEval and deEval.netValue > minBuyout then
-                    if not vendorSell or deEval.netValue > vendorSell then
-                        local isShard = deEval.isShardOrCrystal == true
-                        table.insert(candidates, {
-                            actionType = "BUY_DE",
-                            itemId = itemId,
-                            itemName = itemName,
-                            ahCutRate = ahCut,
-                            unitGrossRevenue = deEval.grossValue,
-                            unitNetRevenue = deEval.netValue,
-                            unitAHCut = deEval.ahCut or (deEval.grossValue - deEval.netValue),
-                            unitDepositRisk = 0,
-                            deBreakdown = deEval,
-                            spikeInfo = FindDESpikeInfo(deEval),
-                            maxUnits = isShard and maxShardDEUnits or maxDEUnits,
-                            rawReagents = {
-                                { itemId = itemId, name = itemName, count = 1 },
-                            },
-                        })
+            -- Strategy B: Direct AH Buy -> Disenchant (fast pre-check skips ~85% of non-gear items before CanDisenchant)
+            if allowDEPlays and meta then
+                local q = meta.quality or 0
+                local c = meta.classID
+                if q >= 2 and q <= 4 and (c == 2 or c == 4) and PF.DisenchantDatabase.CanDisenchant(itemId) then
+                    local deEval = PF.DisenchantDatabase.EvaluateDisenchant(itemId, nil, resolveExitUnit, ahCut)
+                    if deEval and deEval.netValue > minBuyout then
+                        if not vendorSell or deEval.netValue > vendorSell then
+                            local isShard = deEval.isShardOrCrystal == true
+                            table.insert(candidates, {
+                                actionType = "BUY_DE",
+                                itemId = itemId,
+                                itemName = itemName,
+                                ahCutRate = ahCut,
+                                unitGrossRevenue = deEval.grossValue,
+                                unitNetRevenue = deEval.netValue,
+                                unitAHCut = deEval.ahCut or (deEval.grossValue - deEval.netValue),
+                                unitDepositRisk = 0,
+                                deBreakdown = deEval,
+                                spikeInfo = FindDESpikeInfo(deEval),
+                                maxUnits = isShard and maxShardDEUnits or maxDEUnits,
+                                rawReagents = {
+                                    { itemId = itemId, name = itemName, count = 1 },
+                                },
+                            })
+                        end
                     end
                 end
             end
@@ -1308,4 +1328,174 @@ function PF.OpportunityEngine.FindTopOpportunities(budgetOverride, customOrderBo
     end
 
     return results, allEvaluated, honorableMentions
+end
+
+-- Fast O(1) single-opportunity re-evaluation used when live AH search results arrive while
+-- DetailWindow is open, avoiding a full 7,000+ item FindTopOpportunities() scan on every AH click/buy.
+function PF.OpportunityEngine.ReevaluateSingleOpportunity(opp, budgetOverride)
+    if type(opp) ~= "table" then return nil end
+    local settings = (Profitable_DB and Profitable_DB.settings) or {}
+    local ahCut = (PF.GetEffectiveAHCutRate and PF.GetEffectiveAHCutRate()) or settings.ahCutRate or 0.05
+    local budget = (type(budgetOverride) == "number" and budgetOverride >= 0)
+        and budgetOverride
+        or PF.Formatter.GetPlayerGold()
+    local deductDeposit = (settings.deductExpectedDeposit ~= false)
+
+    local resolveExitUnit = function(id)
+        local rawPrice = PF.OpportunityEngine.ResolveAHPrice(id)
+        if not rawPrice then return nil end
+        if PF.MarketFeed and PF.MarketFeed.GetExitPrice then
+            return PF.MarketFeed.GetExitPrice(id, rawPrice)
+        end
+        return rawPrice
+    end
+
+    local actionType = opp.actionType
+    if actionType == "BUY_DE" then
+        local group = {}
+        local list = (type(opp.shoppingList) == "table" and #opp.shoppingList > 0) and opp.shoppingList
+            or { { itemId = opp.itemId, name = opp.itemName, link = opp.itemLink } }
+        for _, shop in ipairs(list) do
+            if shop and shop.itemId and shop.itemId > 0 then
+                local minBuyout = PF.OpportunityEngine.ResolveAHPrice(shop.itemId)
+                if minBuyout and minBuyout > 0 and PF.DisenchantDatabase.CanDisenchant(shop.itemId, shop.link) then
+                    local deEval = PF.DisenchantDatabase.EvaluateDisenchant(shop.itemId, shop.link, resolveExitUnit, ahCut)
+                    if deEval and deEval.netValue > minBuyout then
+                        local isShard = deEval.isShardOrCrystal == true
+                        table.insert(group, {
+                            actionType = "BUY_DE",
+                            itemId = shop.itemId,
+                            itemName = shop.name or ("Item #" .. shop.itemId),
+                            ahCutRate = ahCut,
+                            unitGrossRevenue = deEval.grossValue,
+                            unitNetRevenue = deEval.netValue,
+                            unitAHCut = deEval.ahCut or (deEval.grossValue - deEval.netValue),
+                            unitDepositRisk = 0,
+                            deBreakdown = deEval,
+                            maxUnits = isShard and (settings.maxShardDEUnits or 8) or (settings.maxDEUnits or 30),
+                            rawReagents = { { itemId = shop.itemId, name = shop.name, count = 1 } },
+                        })
+                    end
+                end
+            end
+        end
+        if #group == 0 then return nil end
+        local updated = PF.OpportunityEngine.CalculateAggregatedBuyDEOpportunity(group, budget)
+        if updated and updated.totalProfit > 0 then
+            updated.rank = opp.rank
+            updated.summaryLine = PF.OpportunityEngine.FormatOpportunityLine(updated.rank, updated)
+            updated.explanation = PF.OpportunityEngine.BuildDetailedExplanation(updated)
+            return updated
+        end
+        return nil
+    end
+
+    local cand = nil
+    if actionType == "VENDOR" then
+        local vendorSell = PF.VendorDatabase.GetVendorSellPrice(opp.itemId, opp.itemLink)
+        if not vendorSell or vendorSell <= 0 then return nil end
+        cand = {
+            actionType = "VENDOR",
+            itemId = opp.itemId,
+            itemName = opp.itemName,
+            itemLink = opp.itemLink,
+            ahCutRate = 0,
+            unitGrossRevenue = vendorSell,
+            unitNetRevenue = vendorSell,
+            unitAHCut = 0,
+            unitDepositRisk = 0,
+            maxUnits = settings.maxVendorUnits or 200,
+            rawReagents = { { itemId = opp.itemId, name = opp.itemName, count = 1 } },
+        }
+    elseif opp.recipe and type(opp.recipe.reagents) == "table" and #opp.recipe.reagents > 0 then
+        local recipe = opp.recipe
+        local outId = opp.itemId or recipe.outputItemId
+        local avgMade = (recipe.avgMade and recipe.avgMade > 0) and recipe.avgMade or 1
+        local meta = PF.VendorDatabase.GetItemMetadata(outId, recipe.outputLink or opp.itemLink, true)
+        local isEquippableGear = meta and (meta.classID == 2 or meta.classID == 4) and (meta.invType and meta.invType ~= "")
+
+        if actionType == "CRAFT_VENDOR" then
+            local vendorSell = PF.VendorDatabase.GetVendorSellPrice(outId, recipe.outputLink or opp.itemLink)
+            local rev = vendorSell and math.floor(vendorSell * avgMade) or 0
+            if rev <= 0 then return nil end
+            cand = {
+                actionType = "CRAFT_VENDOR",
+                itemId = outId,
+                itemName = opp.itemName,
+                itemLink = opp.itemLink or recipe.outputLink,
+                recipe = recipe,
+                avgMade = avgMade,
+                ahCutRate = 0,
+                unitGrossRevenue = rev,
+                unitNetRevenue = rev,
+                unitAHCut = 0,
+                unitDepositRisk = 0,
+                maxUnits = settings.maxVendorUnits or 200,
+                rawReagents = recipe.reagents,
+            }
+        elseif actionType == "CRAFT_AH" then
+            local rawAH = PF.OpportunityEngine.ResolveAHPrice(outId, recipe.outputLink or opp.itemLink)
+            if not rawAH or rawAH <= 0 then return nil end
+            local ahUnit, ahSpiked, ahSpikeInfo = rawAH, false, nil
+            if PF.MarketFeed and PF.MarketFeed.GetExitPrice then
+                ahUnit, ahSpiked, ahSpikeInfo = PF.MarketFeed.GetExitPrice(outId, rawAH)
+            end
+            local gross = math.floor(ahUnit * avgMade)
+            local cut = math.ceil(gross * ahCut)
+            local vendorSell = PF.VendorDatabase.GetVendorSellPrice(outId, recipe.outputLink or opp.itemLink)
+            local craftVendorRev = vendorSell and math.floor(vendorSell * avgMade) or 0
+            local depRisk = (isEquippableGear and deductDeposit and craftVendorRev > 0) and math.floor(craftVendorRev * 0.15) or 0
+            local net = math.max(0, gross - cut - depRisk)
+            if net <= 0 then return nil end
+            cand = {
+                actionType = "CRAFT_AH",
+                itemId = outId,
+                itemName = opp.itemName,
+                itemLink = opp.itemLink or recipe.outputLink,
+                recipe = recipe,
+                avgMade = avgMade,
+                ahCutRate = ahCut,
+                unitGrossRevenue = gross,
+                unitNetRevenue = net,
+                unitAHCut = cut,
+                unitDepositRisk = depRisk,
+                spikeInfo = ahSpiked and ahSpikeInfo or nil,
+                maxUnits = isEquippableGear and (settings.maxAHGearUnits or 3) or (settings.maxAHCraftUnits or 20),
+                rawReagents = recipe.reagents,
+            }
+        elseif actionType == "CRAFT_DE" then
+            if not PF.DisenchantDatabase.CanDisenchant(outId, recipe.outputLink or opp.itemLink) then return nil end
+            local deEval = PF.DisenchantDatabase.EvaluateDisenchant(outId, recipe.outputLink or opp.itemLink, resolveExitUnit, ahCut)
+            if not deEval or deEval.netValue <= 0 then return nil end
+            local gross = math.floor(deEval.grossValue * avgMade)
+            local net = math.floor(deEval.netValue * avgMade)
+            local isShard = deEval.isShardOrCrystal == true
+            cand = {
+                actionType = "CRAFT_DE",
+                itemId = outId,
+                itemName = opp.itemName,
+                itemLink = opp.itemLink or recipe.outputLink,
+                recipe = recipe,
+                avgMade = avgMade,
+                deBreakdown = deEval,
+                ahCutRate = ahCut,
+                unitGrossRevenue = gross,
+                unitNetRevenue = net,
+                unitAHCut = math.max(0, gross - net),
+                unitDepositRisk = 0,
+                maxUnits = isShard and (settings.maxShardDEUnits or 8) or (settings.maxDEUnits or 30),
+                rawReagents = recipe.reagents,
+            }
+        end
+    end
+
+    if not cand then return nil end
+    local updated = PF.OpportunityEngine.CalculateSteppedOpportunity(cand, budget)
+    if updated and updated.totalProfit > 0 then
+        updated.rank = opp.rank
+        updated.summaryLine = PF.OpportunityEngine.FormatOpportunityLine(updated.rank, updated)
+        updated.explanation = PF.OpportunityEngine.BuildDetailedExplanation(updated)
+        return updated
+    end
+    return nil
 end

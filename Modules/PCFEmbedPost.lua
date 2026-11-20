@@ -70,7 +70,20 @@ local function GetActiveSellFrameItem()
 end
 
 if _G.PCF and type(_G.PCF.Scanner) == "table" then
+    if type(_G.PCF.Scanner.SniffCommoditySearchResults) == "function" then
+        local origSniffCommodity = _G.PCF.Scanner.SniffCommoditySearchResults
+        _G.PCF.Scanner.SniffCommoditySearchResults = function(itemId)
+            if _G.PF and _G.PF.AHVerifier and _G.PF.AHVerifier.IsRunning and _G.PF.AHVerifier.IsRunning() then
+                return 0
+            end
+            return origSniffCommodity(itemId)
+        end
+    end
+
     _G.PCF.Scanner.SniffItemSearchResults = function(itemKey)
+        if _G.PF and _G.PF.AHVerifier and _G.PF.AHVerifier.IsRunning and _G.PF.AHVerifier.IsRunning() then
+            return 0
+        end
         if not (_G.PCF_DB and _G.PCF_DB.settings and _G.PCF_DB.settings.enabled ~= false and _G.PCF_DB.settings.passiveSniffing ~= false) then
             return 0
         end

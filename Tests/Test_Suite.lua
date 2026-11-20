@@ -1865,4 +1865,141 @@ do
     )
 end
 
+-- 26. Regression Tests: Window Layering (MEDIUM + SetToplevel) & AH Verification / Search Performance
+do
+    local origCAH = _G.C_AuctionHouse
+    local origAHFrame = _G.AuctionHouseFrame
+    local origAuctionFrame = _G.AuctionFrame
+    local origGetItemInfo = _G.GetItemInfo
+    local origCItem = _G.C_Item
+    local origFindTop = _G.PF.OpportunityEngine.FindTopOpportunities
+
+    -- 26A. All primary Profitable windows use MEDIUM strata + SetToplevel(true) so Professions/AH windows can pull to front
+    Assert(
+        _G.PF.DetailWindow.frame:GetFrameStrata() == "MEDIUM" and _G.PF.DetailWindow.frame:IsToplevel() == true,
+        "DetailWindow uses MEDIUM strata + SetToplevel(true) so clicking Professions/Crafting pulls it in front"
+    )
+    Assert(
+        _G.PF.SideWindow.frame:GetFrameStrata() == "MEDIUM" and _G.PF.SideWindow.frame:IsToplevel() == true,
+        "SideWindow uses MEDIUM strata + SetToplevel(true) so Blizzard panels and Profitable swap focus cleanly"
+    )
+    _G.PF.SideWindow.ToggleSettingsWindow()
+    local settingsWin = _G.PF.SideWindow.settingsFrame
+    Assert(
+        settingsWin and settingsWin:GetFrameStrata() == "MEDIUM" and settingsWin:IsToplevel() == true,
+        "SettingsWindow uses MEDIUM strata + SetToplevel(true)"
+    )
+    _G.PF.SideWindow.ToggleSettingsWindow()
+
+    -- 26B. GetItemMetadata hits itemCache in O(1) without calling GetItemInfo or RequestLoadItemDataByID on cached items
+    local getItemInfoCalls = 0
+    local serverLoadRequests = 0
+    _G.GetItemInfo = function(id)
+        getItemInfoCalls = getItemInfoCalls + 1
+        return origGetItemInfo(id)
+    end
+    _G.C_Item = {
+        GetItemInfo = _G.GetItemInfo,
+        RequestLoadItemDataByID = function()
+            serverLoadRequests = serverLoadRequests + 1
+        end,
+    }
+    _G.Profitable_DB.itemCache[2589] = { name = "Linen Cloth", quality = 1, itemLevel = 5, classID = 7, subClassID = 5, invType = "", vendorSell = 13 }
+    local meta26 = _G.PF.VendorDatabase.GetItemMetadata(2589)
+    Assert(meta26 and meta26.name == "Linen Cloth" and getItemInfoCalls == 0, "GetItemMetadata serves cached items in O(1) with zero GetItemInfo calls")
+
+    -- Uncached item during bulk scan (skipServerRequest = true) sends ZERO RequestLoadItemDataByID packets
+    _G.Profitable_DB.itemCache[999123] = nil
+    _G.PF.VendorDatabase.GetItemMetadata(999123, nil, true)
+    Assert(serverLoadRequests == 0, "Bulk scan GetItemMetadata(id, nil, true) sends zero RequestLoadItemDataByID server packets")
+
+    -- 26C. HarvestBrowseResultItemKeys caches GetBrowseResults once per browse batch instead of looping 7,000+ items per click
+    local getBrowseCalls26 = 0
+    local commodityRowReads26 = 0
+    _G.AuctionFrame = nil
+    _G.AuctionHouseFrame = _G.CreateFrame("Frame", "AuctionHouseFrame", _G.UIParent)
+    _G.AuctionHouseFrame:Show()
+    _G.AuctionHouseFrame.SelectBrowseResult = function() end
+    _G.C_AuctionHouse = {
+        MakeItemKey = function(id) return { itemID = id, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 } end,
+        GetItemKeyInfo = function(key) return { itemID = key.itemID, isCommodity = true } end,
+        IsThrottledMessageSystemReady = function() return true end,
+        GetBrowseResults = function()
+            getBrowseCalls26 = getBrowseCalls26 + 1
+            return { { itemKey = { itemID = 2589 }, minPrice = 15, totalQuantity = 100 } }
+        end,
+        SendSearchQuery = function(key)
+            _G.PF.AHVerifier.frame:Trigger("COMMODITY_SEARCH_RESULTS_UPDATED", key.itemID)
+        end,
+        GetNumCommoditySearchResults = function(id)
+            if id == 2589 then return 500 end -- 500 commodity rows!
+            return 0
+        end,
+        GetCommoditySearchResultInfo = function(id, idx)
+            commodityRowReads26 = commodityRowReads26 + 1
+            return { unitPrice = 10 + idx, quantity = 50 }
+        end,
+    }
+    _G.PF.AHVerifier.frame:Trigger("AUCTION_HOUSE_CLOSED")
+    _G.PF.AHVerifier.SearchItemOnAH(2589, "Linen Cloth", nil, 20)
+    _G.PF.AHVerifier.SearchItemOnAH(2589, "Linen Cloth", nil, 20)
+    _G.PF.AHVerifier.SearchItemOnAH(2589, "Linen Cloth", nil, 20)
+    Assert(getBrowseCalls26 == 1, "Repeated 'Open in AH' clicks harvest GetBrowseResults() only ONCE per browse batch (never re-scanning 7,000+ rows per click)")
+
+    -- 26D. CollectModernCommodityResults stops early at MAX_ORDERBOOK_QTY (600) instead of scanning all 500 rows
+    commodityRowReads26 = 0
+    _G.PF.AHVerifier.frame:Trigger("COMMODITY_SEARCH_RESULTS_UPDATED", 2589)
+    Assert(commodityRowReads26 <= 15, "CollectModernCommodityResults stops early once 600+ units collected instead of iterating all 500 AH rows")
+
+    -- 26E. DetailWindow.RevalidateActiveOpportunity uses O(1) ReevaluateSingleOpportunity without calling full FindTopOpportunities()
+    local findTopCalls26 = 0
+    _G.PF.OpportunityEngine.FindTopOpportunities = function(...)
+        findTopCalls26 = findTopCalls26 + 1
+        return origFindTop(...)
+    end
+    local linenVendorOpp = {
+        id = "VENDOR:2589",
+        actionType = "VENDOR",
+        actionLabel = "Vendor",
+        itemId = 2589,
+        itemName = "Linen Cloth",
+        itemLink = "|cffffffff|Hitem:2589:0:0:0|h[Linen Cloth]|h|r",
+        quantity = 20,
+        totalCost = 200,
+        totalNetRevenue = 260,
+        totalProfit = 60,
+        roiPercent = 30,
+        verified = true,
+        shoppingList = {
+            { itemId = 2589, name = "Linen Cloth", link = "[Linen Cloth]", source = "AH", totalQuantity = 20, avgUnitPrice = 10, minUnitPrice = 10, maxUnitPrice = 10, totalCost = 200 },
+        },
+    }
+    _G.PF.DetailWindow.ShowOpportunity(linenVendorOpp)
+    findTopCalls26 = 0
+    _G.PF.AHVerifier.frame:Trigger("COMMODITY_SEARCH_RESULTS_UPDATED", 2589)
+    Assert(findTopCalls26 == 0, "DetailWindow.RevalidateActiveOpportunity re-evaluates active play in O(1) with ZERO full FindTopOpportunities() scans")
+
+    -- 26F. StartDiscoveryAndVerification runs FindTopOpportunities() once at start (not twice) and NOT on every single verified item
+    local now26 = math.floor(Mock.currentTime)
+    _G.PCF_DB.prices = {
+        [2589] = { minBuyout = 5, count = 100, lastUpdated = now26, source = "Scan" },
+    }
+    _G.Profitable_DB.orderBookCache = {}
+    findTopCalls26 = 0
+    Mock.timers = {}
+    _G.PF.AHVerifier.StartDiscoveryAndVerification()
+    Assert(findTopCalls26 == 1, "StartDiscoveryAndVerification calls FindTopOpportunities() ONCE at start (not twice)")
+    Mock.FlushTimers(30)
+    -- 1 initial + 1 end-of-pass check + 1 FinalizeRun = at most 3 (regardless of queue length, never N+3)
+    Assert(findTopCalls26 <= 3, "Verification run avoids per-item FindTopOpportunities() recalculations")
+
+    -- Restore globals
+    _G.PF.OpportunityEngine.FindTopOpportunities = origFindTop
+    _G.C_AuctionHouse = origCAH
+    _G.AuctionHouseFrame = origAHFrame
+    _G.AuctionFrame = origAuctionFrame
+    _G.GetItemInfo = origGetItemInfo
+    _G.C_Item = origCItem
+end
+
 print("\nAll Profitable test assertions passed successfully!")

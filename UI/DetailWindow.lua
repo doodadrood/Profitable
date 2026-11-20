@@ -7,6 +7,7 @@ PF.DetailWindow = {}
 local detailFrame = nil
 local currentOpportunity = nil
 local shoppingRows = {}
+local scrollUpdatePending = false
 local MAX_SHOPPING_ROWS = 20
 local SCROLL_VIEWPORT_HEIGHT = 360
 local SCROLL_STEP = 38
@@ -309,7 +310,10 @@ local function EnsureDetailFrame()
     detailFrame = CreateFrame("Frame", "PF_OpportunityDetailWindow", _G.UIParent)
     if detailFrame.SetSize then detailFrame:SetSize(480, 520) end
     if detailFrame.SetPoint then detailFrame:SetPoint("CENTER", _G.UIParent, "CENTER", 220, 0) end
-    if detailFrame.SetFrameStrata then detailFrame:SetFrameStrata("DIALOG") end
+    -- Use MEDIUM strata + SetToplevel(true) matching Blizzard UI panels (ProfessionsFrame,
+    -- AuctionHouseFrame, etc.) so clicking any window brings whichever one is in focus to the front.
+    if detailFrame.SetFrameStrata then detailFrame:SetFrameStrata("MEDIUM") end
+    if detailFrame.SetToplevel then detailFrame:SetToplevel(true) end
     if detailFrame.SetMovable then detailFrame:SetMovable(true) end
     if detailFrame.EnableMouse then detailFrame:EnableMouse(true) end
     if detailFrame.RegisterForDrag then detailFrame:RegisterForDrag("LeftButton") end
@@ -530,28 +534,15 @@ function PF.DetailWindow.RevalidateActiveOpportunity(updatedItemId)
     end
     local opp = currentOpportunity or (Profitable_DB and Profitable_DB.activePlay)
     if not opp or not OpportunityReferencesItem(opp, updatedItemId) then
-        PF.DetailWindow.RefreshIfShown()
         return false
     end
 
-    if PF.AHVerifier and PF.AHVerifier.RecalculateFromCache then
-        local _, _, allEvaluated = PF.AHVerifier.RecalculateFromCache()
-        if PF.SideWindow and PF.SideWindow.RefreshRows then
-            PF.SideWindow.RefreshRows()
-        end
-
-        local matched = nil
-        if type(allEvaluated) == "table" and opp.id then
-            for _, cand in ipairs(allEvaluated) do
-                if cand and cand.id == opp.id then
-                    matched = cand
-                    break
-                end
-            end
-        end
-
+    -- Fast O(1) single-opportunity re-evaluation instead of re-scanning all 7,000+ AH items
+    -- on every COMMODITY_SEARCH_RESULTS_UPDATED / ITEM_SEARCH_RESULTS_UPDATED click or purchase.
+    if PF.OpportunityEngine and PF.OpportunityEngine.ReevaluateSingleOpportunity then
+        local matched = PF.OpportunityEngine.ReevaluateSingleOpportunity(opp)
         if matched then
-            matched.explanation = matched.explanation or (PF.OpportunityEngine and PF.OpportunityEngine.BuildDetailedExplanation and PF.OpportunityEngine.BuildDetailedExplanation(matched))
+            matched.verified = opp.verified
             matched._liveUnprofitable = false
             currentOpportunity = matched
             if Profitable_DB then
@@ -597,6 +588,7 @@ function PF.DetailWindow.ShowOpportunity(opp)
 
     local frame = EnsureDetailFrame()
     frame:Show()
+    if frame.Raise then frame:Raise() end
     ApplyScrollOffset(0)
 
     if PF.AHVerifier and PF.AHVerifier.OpenNextNeededItemInDefaultAH then
@@ -898,7 +890,11 @@ function PF.DetailWindow.RefreshIfShown()
     end
 
     UpdateScrollRange()
-    if _G.C_Timer and _G.C_Timer.After then
-        _G.C_Timer.After(0, UpdateScrollRange)
+    if not scrollUpdatePending and _G.C_Timer and _G.C_Timer.After then
+        scrollUpdatePending = true
+        _G.C_Timer.After(0, function()
+            scrollUpdatePending = false
+            UpdateScrollRange()
+        end)
     end
 end

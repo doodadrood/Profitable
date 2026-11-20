@@ -257,7 +257,9 @@ function PF.VendorDatabase.IsVendorReagent(itemId)
     return PF.VendorDatabase.GetVendorBuyPrice(itemId) ~= nil
 end
 
-local function QueryGameItemInfo(target)
+local requestedItemDataLoads = {}
+
+local function QueryGameItemInfo(target, skipServerRequest)
     if not target then return nil end
     local getInfo = (_G.C_Item and _G.C_Item.GetItemInfo) or _G.GetItemInfo
     if type(getInfo) ~= "function" then
@@ -267,7 +269,9 @@ local function QueryGameItemInfo(target)
     local ok, itemName, itemLink, itemQuality, itemLevel, itemMinLevel, itemType, itemSubType,
         itemStackCount, itemEquipLoc, itemTexture, sellPrice, classID, subclassID = pcall(getInfo, target)
     if not ok or not itemName then
-        if type(target) == "number" and _G.C_Item and type(_G.C_Item.RequestLoadItemDataByID) == "function" then
+        if not skipServerRequest and type(target) == "number" and not requestedItemDataLoads[target]
+            and _G.C_Item and type(_G.C_Item.RequestLoadItemDataByID) == "function" then
+            requestedItemDataLoads[target] = true
             pcall(_G.C_Item.RequestLoadItemDataByID, target)
         end
         return nil
@@ -300,7 +304,7 @@ local function QueryGameItemInfo(target)
     }
 end
 
-function PF.VendorDatabase.GetItemMetadata(itemId, itemLink)
+function PF.VendorDatabase.GetItemMetadata(itemId, itemLink, skipServerRequest)
     if not itemId and type(itemLink) == "string" then
         itemId = tonumber(itemLink:match("item:(%d+)"))
     end
@@ -308,7 +312,16 @@ function PF.VendorDatabase.GetItemMetadata(itemId, itemLink)
         return nil
     end
 
-    local live = QueryGameItemInfo(itemLink or itemId)
+    -- Check cached metadata first (O(1), zero GetItemInfo calls or table allocations during 7,000+ item scans)
+    local cached = Profitable_DB and Profitable_DB.itemCache and Profitable_DB.itemCache[itemId]
+    if cached and cached.name and cached.classID ~= nil and cached.vendorSell ~= nil then
+        if itemLink and not cached.link then
+            cached.link = itemLink
+        end
+        return cached
+    end
+
+    local live = QueryGameItemInfo(itemLink or itemId, skipServerRequest)
     if live then
         if Profitable_DB and Profitable_DB.itemCache then
             Profitable_DB.itemCache[itemId] = live
@@ -316,8 +329,8 @@ function PF.VendorDatabase.GetItemMetadata(itemId, itemLink)
         return live
     end
 
-    if Profitable_DB and Profitable_DB.itemCache and Profitable_DB.itemCache[itemId] then
-        return Profitable_DB.itemCache[itemId]
+    if cached then
+        return cached
     end
 
     local seed = SEED_ITEM_METADATA[itemId]
@@ -329,9 +342,14 @@ function PF.VendorDatabase.GetItemMetadata(itemId, itemLink)
 end
 
 function PF.VendorDatabase.GetVendorSellPrice(itemId, itemLink)
-    local meta = PF.VendorDatabase.GetItemMetadata(itemId, itemLink)
-    if meta and type(meta.vendorSell) == "number" and meta.vendorSell > 0 then
-        return meta.vendorSell
+    local meta = PF.VendorDatabase.GetItemMetadata(itemId, itemLink, true)
+    if meta then
+        if type(meta.vendorSell) == "number" and meta.vendorSell > 0 then
+            return meta.vendorSell
+        end
+        if meta.vendorSell == 0 then
+            return nil
+        end
     end
     if _G.PCF and _G.PCF.ProviderRegistry and _G.PCF.ProviderRegistry.GetVendorPrice then
         local ok, vp = pcall(_G.PCF.ProviderRegistry.GetVendorPrice, itemLink, itemId)

@@ -19,7 +19,12 @@ local itemKeyCallbacks = {}
 
 -- Exact itemKey cache per itemId (preserves non-zero itemLevel / itemSuffix for gear from BrowseResults)
 local knownItemKeys = {}         -- [itemId] = itemKeyTable
+local browseResultsHarvested = false
 local pendingBrowseResolve = nil -- { itemId, itemName, desiredQuantity }
+local pollItemKeyElapsed = 0
+local MAX_ORDERBOOK_ROWS = 60
+local MAX_ORDERBOOK_QTY = 600
+local MAX_VERIFY_QUEUE = 25
 
 -- Active / Pending Default AH UI Purchase State
 local activeSearchItemId = nil
@@ -58,13 +63,17 @@ function PF.AHVerifier.IsRunning()
 end
 
 -- Harvests exact itemKeys (including itemLevel and itemSuffix for green/blue gear)
--- from C_AuctionHouse.GetBrowseResults() whenever browse results arrive.
+-- from C_AuctionHouse.GetBrowseResults() once per browse batch (or incrementally from delta batches).
 local function HarvestBrowseResultItemKeys(results)
     if type(results) ~= "table" then
+        if browseResultsHarvested then
+            return
+        end
         if _G.C_AuctionHouse and _G.C_AuctionHouse.GetBrowseResults then
             local ok, br = pcall(_G.C_AuctionHouse.GetBrowseResults)
             if ok and type(br) == "table" then
                 results = br
+                browseResultsHarvested = true
             end
         end
     end
@@ -102,6 +111,7 @@ end
 
 local function ClearPendingItemKeyWatchers()
     if next(itemKeyCallbacks) == nil then
+        pollItemKeyElapsed = 0
         SafeUnregisterEvent(verifierFrame, "ITEM_KEY_ITEM_INFO_RECEIVED")
         if verifierFrame.SetScript then
             verifierFrame:SetScript("OnUpdate", nil)
@@ -111,15 +121,24 @@ end
 
 local function PollPendingItemKeys()
     if not _G.C_AuctionHouse or not _G.C_AuctionHouse.GetItemKeyInfo then
+        itemKeyCallbacks = {}
+        ClearPendingItemKeyWatchers()
         return
     end
+    local now = (_G.GetTime and _G.GetTime()) or 0
     local ready = {}
-    for itemId, callbacks in pairs(itemKeyCallbacks) do
+    local expired = {}
+    for itemId, entry in pairs(itemKeyCallbacks) do
         local key = PF.AHVerifier.MakeItemKey(itemId)
         local ok, info = pcall(_G.C_AuctionHouse.GetItemKeyInfo, key)
         if ok and info then
-            table.insert(ready, { itemId = itemId, key = key, info = info, callbacks = callbacks })
+            table.insert(ready, { itemId = itemId, key = key, info = info, callbacks = entry.callbacks })
+        elseif entry.expiresAt and now > entry.expiresAt then
+            table.insert(expired, itemId)
         end
+    end
+    for _, itemId in ipairs(expired) do
+        itemKeyCallbacks[itemId] = nil
     end
     for _, entry in ipairs(ready) do
         itemKeyCallbacks[entry.itemId] = nil
@@ -131,6 +150,15 @@ local function PollPendingItemKeys()
         end
     end
     ClearPendingItemKeyWatchers()
+end
+
+local function OnUpdatePollPendingItemKeys(_, elapsed)
+    pollItemKeyElapsed = pollItemKeyElapsed + (tonumber(elapsed) or 0)
+    if pollItemKeyElapsed < 0.20 then
+        return
+    end
+    pollItemKeyElapsed = 0
+    PollPendingItemKeys()
 end
 
 function PF.AHVerifier.WithItemKeyInfo(itemId, callback)
@@ -150,11 +178,17 @@ function PF.AHVerifier.WithItemKeyInfo(itemId, callback)
         return true
     end
 
-    itemKeyCallbacks[itemId] = itemKeyCallbacks[itemId] or {}
-    table.insert(itemKeyCallbacks[itemId], callback)
+    local now = (_G.GetTime and _G.GetTime()) or 0
+    if not itemKeyCallbacks[itemId] then
+        itemKeyCallbacks[itemId] = { callbacks = {}, expiresAt = now + 3.0 }
+    else
+        itemKeyCallbacks[itemId].expiresAt = now + 3.0
+    end
+    table.insert(itemKeyCallbacks[itemId].callbacks, callback)
     SafeRegisterEvent(verifierFrame, "ITEM_KEY_ITEM_INFO_RECEIVED")
     if verifierFrame.SetScript then
-        verifierFrame:SetScript("OnUpdate", PollPendingItemKeys)
+        pollItemKeyElapsed = 0
+        verifierFrame:SetScript("OnUpdate", OnUpdatePollPendingItemKeys)
     end
     return false
 end
@@ -287,6 +321,7 @@ local activeFeedFreshWindow = false
 
 local function EnqueueVerificationItem(itemId, itemName)
     if not itemId or itemId <= 0 or activeQueuedIds[itemId] then return end
+    if #verifyQueue >= MAX_VERIFY_QUEUE then return end
     if PF.VendorDatabase.IsVendorReagent(itemId) then return end
     activeQueuedIds[itemId] = true
     if not activeForceLiveVerify and activeFeedFreshWindow then
@@ -302,7 +337,7 @@ local function EnqueueVerificationItem(itemId, itemName)
             end
         end
     end
-    local meta = PF.VendorDatabase.GetItemMetadata(itemId)
+    local meta = PF.VendorDatabase.GetItemMetadata(itemId, nil, true)
     local resolvedName = itemName or (meta and meta.name) or string.format("Item #%d", itemId)
     table.insert(verifyQueue, {
         itemId = itemId,
@@ -477,12 +512,18 @@ local function CollectModernCommodityResults(itemId)
         return false
     end
     local listings = {}
-    for i = 1, num do
+    local limit = math.min(num, MAX_ORDERBOOK_ROWS)
+    local accumQty = 0
+    for i = 1, limit do
         local okRow, row = pcall(_G.C_AuctionHouse.GetCommoditySearchResultInfo, itemId, i)
         if okRow and type(row) == "table" and row.unitPrice and row.unitPrice > 0 and row.quantity and row.quantity > 0 then
             local availQty = math.floor(row.quantity) - math.floor(tonumber(row.numOwnerItems) or 0)
             if availQty > 0 then
                 table.insert(listings, { unitPrice = math.floor(row.unitPrice), quantity = availQty })
+                accumQty = accumQty + availQty
+                if accumQty >= MAX_ORDERBOOK_QTY then
+                    break
+                end
             end
         end
     end
@@ -513,7 +554,9 @@ local function CollectModernItemResults(itemId, itemKey)
     end
     local buyoutOnly = IsBuyoutOnlyEnabled()
     local listings = {}
-    for i = 1, num do
+    local limit = math.min(num, MAX_ORDERBOOK_ROWS)
+    local accumQty = 0
+    for i = 1, limit do
         local okRow, row = pcall(_G.C_AuctionHouse.GetItemSearchResultInfo, itemKey, i)
         if okRow and type(row) == "table" and not row.containsOwnerItem and not row.containsAccountItem then
             local buyout = (row.buyoutAmount and row.buyoutAmount > 0) and row.buyoutAmount or nil
@@ -528,6 +571,10 @@ local function CollectModernItemResults(itemId, itemKey)
                 local unitPrice = math.floor(buyout)
                 if unitPrice > 0 then
                     table.insert(listings, { unitPrice = unitPrice, quantity = qty })
+                    accumQty = accumQty + qty
+                    if accumQty >= MAX_ORDERBOOK_QTY then
+                        break
+                    end
                 end
             end
         end
@@ -556,8 +603,12 @@ ScheduleNextVerification = function(delay)
 
         verifyIndex = verifyIndex + 1
         if verifyIndex > #verifyQueue then
-            if PF.AHVerifier.IsAuctionHouseOpen() and ShouldContinuePastTimeout() then
+            if PF.AHVerifier.IsAuctionHouseOpen() and #verifyQueue < MAX_VERIFY_QUEUE and ShouldContinuePastTimeout() then
                 local currentTop, _, currentHM = PF.OpportunityEngine.FindTopOpportunities()
+                MarkVerifiedOpportunities(currentTop, verifiedInSession)
+                MarkVerifiedOpportunities(currentHM, verifiedInSession)
+                Profitable_DB.lastTopPlays = currentTop
+                Profitable_DB.lastHonorableMentions = currentHM
                 EnqueuePlayList(currentTop)
                 EnqueuePlayList(currentHM)
             end
@@ -570,16 +621,10 @@ ScheduleNextVerification = function(delay)
         local target = verifyQueue[verifyIndex]
         currentQueryItem = target
 
-        local topPlays, _, honorableMentions = PF.OpportunityEngine.FindTopOpportunities()
-        MarkVerifiedOpportunities(topPlays, verifiedInSession)
-        MarkVerifiedOpportunities(honorableMentions, verifiedInSession)
-        Profitable_DB.lastTopPlays = topPlays
-        Profitable_DB.lastHonorableMentions = honorableMentions
-
+        -- Lightweight progress update only (never re-scan all 7,000+ AH items on every single verified item)
         if onUpdateCallback then
-            onUpdateCallback(verifyIndex, #verifyQueue, target, topPlays)
-        end
-        if PF.SideWindow and PF.SideWindow.UpdateProgress then
+            onUpdateCallback(verifyIndex, #verifyQueue, target, Profitable_DB and Profitable_DB.lastTopPlays)
+        elseif PF.SideWindow and PF.SideWindow.UpdateProgress then
             PF.SideWindow.UpdateProgress(verifyIndex, #verifyQueue, target)
         end
 
@@ -675,11 +720,15 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
         and PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh(feedSkipAge)
         or false
 
-    local initialTop, _, initialHM = PF.OpportunityEngine.FindTopOpportunities(nil, nil, candidateCount)
-    local top5, _, hm = PF.OpportunityEngine.FindTopOpportunities()
+    local topCount = settings.topCount or 5
+    local initialTop, _, initialHM = PF.OpportunityEngine.FindTopOpportunities(nil, nil, math.max(candidateCount, topCount))
+    local top5 = {}
+    for i = 1, math.min(topCount, #initialTop) do
+        top5[i] = initialTop[i]
+    end
     Profitable_DB = Profitable_DB or {}
     Profitable_DB.lastTopPlays = top5
-    Profitable_DB.lastHonorableMentions = hm
+    Profitable_DB.lastHonorableMentions = initialHM
 
     activeQueuedIds = {}
     activeForceLiveVerify = forceLiveVerify
@@ -1362,6 +1411,7 @@ function PF.AHVerifier.Init()
     if PF.AHVerifier._initialized then return end
     PF.AHVerifier._initialized = true
 
+    SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_CLOSED")
     SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
     SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
     SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
@@ -1369,6 +1419,22 @@ function PF.AHVerifier.Init()
     SafeRegisterEvent(verifierFrame, "ITEM_SEARCH_RESULTS_UPDATED")
 
     verifierFrame:SetScript("OnEvent", function(_, event, arg1, arg2)
+        if event == "AUCTION_HOUSE_CLOSED" then
+            browseResultsHarvested = false
+            knownItemKeys = {}
+            purchasedAuctionIds = {}
+            pendingOpenItemKey = nil
+            pendingSearchCheck = nil
+            pendingBrowseResolve = nil
+            pendingCommodityConfirm = nil
+            itemKeyCallbacks = {}
+            ClearPendingItemKeyWatchers()
+            if isRunning then
+                FinalizeRun("AH_CLOSED")
+            end
+            return
+        end
+
         if event == "ITEM_KEY_ITEM_INFO_RECEIVED" then
             PollPendingItemKeys()
             return
@@ -1380,7 +1446,12 @@ function PF.AHVerifier.Init()
         end
 
         if event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" or event == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
-            HarvestBrowseResultItemKeys(type(arg1) == "table" and arg1 or nil)
+            if event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
+                browseResultsHarvested = false
+                HarvestBrowseResultItemKeys(type(arg1) == "table" and arg1 or nil)
+            elseif type(arg1) == "table" and #arg1 > 0 then
+                HarvestBrowseResultItemKeys(arg1)
+            end
             if pendingBrowseResolve then
                 local req = pendingBrowseResolve
                 if knownItemKeys[req.itemId] then
@@ -1471,20 +1542,20 @@ function PF.AHVerifier.Init()
         if event == "AUCTION_ITEM_LIST_UPDATE" then
             CollectLegacyQueryResults(target)
             currentQueryItem = nil
-            ScheduleNextVerification(0.10)
+            ScheduleNextVerification(0.15)
         elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
             local updatedId = tonumber(arg1)
             if not updatedId or updatedId == target.itemId then
                 CollectModernCommodityResults(target.itemId)
                 currentQueryItem = nil
-                ScheduleNextVerification(0.10)
+                ScheduleNextVerification(0.15)
             end
         elseif event == "ITEM_SEARCH_RESULTS_UPDATED" then
             local keyId = (type(arg1) == "table" and arg1.itemID) or tonumber(arg1)
             if not keyId or keyId == target.itemId then
                 CollectModernItemResults(target.itemId, type(arg1) == "table" and arg1 or nil)
                 currentQueryItem = nil
-                ScheduleNextVerification(0.10)
+                ScheduleNextVerification(0.15)
             end
         end
     end)

@@ -99,7 +99,11 @@ _G.CreateFrame = function(frameType, name, parent, template)
     function frame:SetPoint(...) end
     function frame:ClearAllPoints() end
     function frame:SetAllPoints(...) end
-    function frame:SetFrameStrata(...) end
+    function frame:SetFrameStrata(s) self.strata = s end
+    function frame:GetFrameStrata() return self.strata end
+    function frame:SetToplevel(v) self.toplevel = (v == true) end
+    function frame:IsToplevel() return self.toplevel == true end
+    function frame:Raise() self.raiseCount = (self.raiseCount or 0) + 1 end
     function frame:SetMovable(...) end
     function frame:EnableMouse(...) end
     function frame:RegisterForDrag(...) end

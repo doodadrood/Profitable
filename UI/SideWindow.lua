@@ -236,6 +236,7 @@ local function EnsureOnboardingPopup()
     if onboardingFrame.SetSize then onboardingFrame:SetSize(440, 250) end
     if onboardingFrame.SetPoint then onboardingFrame:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 60) end
     if onboardingFrame.SetFrameStrata then onboardingFrame:SetFrameStrata("DIALOG") end
+    if onboardingFrame.SetToplevel then onboardingFrame:SetToplevel(true) end
     if onboardingFrame.SetMovable then onboardingFrame:SetMovable(true) end
     if onboardingFrame.EnableMouse then onboardingFrame:EnableMouse(true) end
     if onboardingFrame.RegisterForDrag then onboardingFrame:RegisterForDrag("LeftButton") end
@@ -458,7 +459,8 @@ local function EnsureSettingsWindow()
     settingsFrame = CreateFrame("Frame", "PF_SettingsWindow", _G.UIParent)
     if settingsFrame.SetSize then settingsFrame:SetSize(410, 385) end
     if settingsFrame.SetPoint then settingsFrame:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 20) end
-    if settingsFrame.SetFrameStrata then settingsFrame:SetFrameStrata("DIALOG") end
+    if settingsFrame.SetFrameStrata then settingsFrame:SetFrameStrata("MEDIUM") end
+    if settingsFrame.SetToplevel then settingsFrame:SetToplevel(true) end
     if settingsFrame.SetMovable then settingsFrame:SetMovable(true) end
     if settingsFrame.EnableMouse then settingsFrame:EnableMouse(true) end
     if settingsFrame.RegisterForDrag then settingsFrame:RegisterForDrag("LeftButton") end
@@ -554,6 +556,7 @@ function PF.SideWindow.ToggleSettingsWindow()
     else
         PF.SideWindow.RefreshFilterControls()
         frame:Show()
+        if frame.Raise then frame:Raise() end
     end
 end
 
@@ -566,7 +569,10 @@ local function EnsureSideWindow()
     sideFrame = CreateFrame("Frame", "PF_AuctionSideWindow", _G.UIParent)
     if sideFrame.SetSize then sideFrame:SetSize(360, 530) end
     if sideFrame.SetPoint then sideFrame:SetPoint("TOPLEFT", _G.UIParent, "TOPLEFT", 850, -100) end
-    if sideFrame.SetFrameStrata then sideFrame:SetFrameStrata("HIGH") end
+    -- Use MEDIUM strata + SetToplevel(true) so Blizzard panels (ProfessionsFrame, AuctionHouseFrame)
+    -- and Profitable windows can freely swap focus when clicked.
+    if sideFrame.SetFrameStrata then sideFrame:SetFrameStrata("MEDIUM") end
+    if sideFrame.SetToplevel then sideFrame:SetToplevel(true) end
     if sideFrame.SetMovable then sideFrame:SetMovable(true) end
     if sideFrame.EnableMouse then sideFrame:EnableMouse(true) end
     if sideFrame.RegisterForDrag then sideFrame:RegisterForDrag("LeftButton") end
@@ -792,7 +798,6 @@ function PF.SideWindow.UpdateProgress(currentIdx, totalCount, targetItem)
         local name = (targetItem and targetItem.name) or "AH"
         sideFrame.statusText:SetText(string.format("Verifying %d/%d: %s", currentIdx or 0, totalCount or 0, name))
     end
-    PF.SideWindow.RefreshRows()
 end
 
 function PF.SideWindow.RefreshRows()
@@ -1064,6 +1069,7 @@ function PF.SideWindow.Toggle()
     else
         AnchorToAuctionHouse()
         frame:Show()
+        if frame.Raise then frame:Raise() end
         PF.SideWindow.Refresh()
         local dataStatus, dataInfo = "FRESH", nil
         if PF.GetAHDataStatus then
