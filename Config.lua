@@ -68,6 +68,7 @@ local defaultConfig = {
     lastTopPlays = {},          -- Cached top 5 opportunities from most recent run
     lastHonorableMentions = {}, -- Cached honorable mention plays (Top Craft & Top Vendor)
     activePlay = nil,           -- Currently tracked opportunity in DetailWindow
+    purchasedInMail = {},       -- [charKey] = { [itemId] = { count = 0, updatedAt = 0, lastBagCount = 0 } }
 }
 
 local function ApplyDefaults(target, defaults)

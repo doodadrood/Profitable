@@ -1197,14 +1197,60 @@ function PF.RecipeScanner.OpenRecipe(recipe)
 end
 
 function PF.RecipeScanner.CraftRecipe(recipe, quantity)
-    if not recipe then return false end
-    quantity = math.max(1, math.floor(tonumber(quantity) or 1))
-
-    if recipe.recipeId and _G.C_TradeSkillUI and _G.C_TradeSkillUI.CraftRecipe then
-        local ok = pcall(_G.C_TradeSkillUI.CraftRecipe, recipe.recipeId, quantity)
-        if ok then return true end
+    if not recipe then return false, "NO_RECIPE" end
+    if _G.InCombatLockdown and _G.InCombatLockdown() then
+        print("|cffff9900[Profitable]|r Cannot craft recipes during combat.")
+        return false, "COMBAT"
     end
 
+    quantity = math.max(1, math.floor(tonumber(quantity) or 1))
+    PF.RecipeScanner.NormalizeRecipeProfession(recipe)
+
+    -- 1. Modern C_TradeSkillUI path (WoW: Forever / Dragonflight+ ProfessionsFrame)
+    if _G.C_TradeSkillUI and _G.C_TradeSkillUI.CraftRecipe then
+        local skillLineID = ResolveSkillLineId(recipe)
+        local isReady = (not _G.C_TradeSkillUI.IsTradeSkillReady) or (_G.C_TradeSkillUI.IsTradeSkillReady() == true)
+        local frameShown = (_G.ProfessionsFrame and _G.ProfessionsFrame.IsShown and _G.ProfessionsFrame:IsShown())
+            or (_G.TradeSkillFrame and _G.TradeSkillFrame.IsShown and _G.TradeSkillFrame:IsShown())
+        local currentProfId = nil
+        if _G.C_TradeSkillUI.GetBaseProfessionInfo then
+            local okB, baseInfo = pcall(_G.C_TradeSkillUI.GetBaseProfessionInfo)
+            if okB and type(baseInfo) == "table" then
+                currentProfId = (type(baseInfo.parentProfessionID) == "number" and baseInfo.parentProfessionID > 0) and baseInfo.parentProfessionID
+                    or ((type(baseInfo.professionID) == "number" and baseInfo.professionID > 0) and baseInfo.professionID or nil)
+            end
+        end
+
+        local profMatches = isReady and (not skillLineID or not currentProfId or currentProfId == skillLineID)
+        local targetId = FindModernRecipeIdInOpenWindow(recipe)
+        local canCraftDirectly = profMatches and targetId and (frameShown or not _G.ProfessionsFrame)
+
+        if not canCraftDirectly then
+            local opened = PF.RecipeScanner.OpenRecipe(recipe)
+            if opened then
+                print(string.format(
+                    "|cff00ff88[Profitable]|r Opened %s to [%s] — click 'Craft %dx' again to start crafting!",
+                    recipe.profession or "profession",
+                    recipe.name or "Recipe",
+                    quantity
+                ))
+            end
+            return false, "OPENING_PROFESSION"
+        end
+
+        local ok = pcall(_G.C_TradeSkillUI.CraftRecipe, targetId, quantity)
+        if ok then
+            print(string.format(
+                "|cff00ff88[Profitable]|r Crafting %dx [%s] (%s)...",
+                quantity,
+                recipe.name or ("Recipe #" .. tostring(targetId)),
+                recipe.profession or "Crafting"
+            ))
+            return true, "CRAFTING"
+        end
+    end
+
+    -- 2. Legacy TradeSkillFrame path (Classic Era without C_TradeSkillUI)
     if _G.GetNumTradeSkills and _G.GetTradeSkillInfo and _G.DoTradeSkill then
         local num = _G.GetNumTradeSkills() or 0
         for i = 1, num do
@@ -1213,12 +1259,26 @@ function PF.RecipeScanner.CraftRecipe(recipe, quantity)
             local outId = link and tonumber(link:match("item:(%d+)"))
             if skillType ~= "header" and skillType ~= "subheader" and (outId == recipe.outputItemId or name == recipe.name) then
                 pcall(_G.DoTradeSkill, i, quantity)
-                return true
+                print(string.format(
+                    "|cff00ff88[Profitable]|r Crafting %dx [%s]...",
+                    quantity,
+                    recipe.name or name or "Recipe"
+                ))
+                return true, "CRAFTING"
             end
         end
     end
 
-    return PF.RecipeScanner.OpenRecipe(recipe)
+    local opened = PF.RecipeScanner.OpenRecipe(recipe)
+    if opened then
+        print(string.format(
+            "|cff00ff88[Profitable]|r Opened %s to [%s] — click 'Craft %dx' again to start crafting!",
+            recipe.profession or "profession",
+            recipe.name or "Recipe",
+            quantity
+        ))
+    end
+    return false, "OPENING_PROFESSION"
 end
 
 function PF.RecipeScanner.Init()

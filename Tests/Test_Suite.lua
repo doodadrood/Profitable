@@ -2231,4 +2231,470 @@ do
     _G.Profitable_DB.settings.showVendorPlays = true
 end
 
+-- 28. UX Tests: Direct Zero-Taint 'Craft Nx' Buttons & Server-Confirmed AH Purchase Tracking / Double-Buy Guard
+do
+    local origCTradeSkillUI = _G.C_TradeSkillUI
+    local origProfFrame = _G.ProfessionsFrame
+    local origGetNumTradeSkills = _G.GetNumTradeSkills
+    local origInCombat = _G.InCombatLockdown
+    local origCAH = _G.C_AuctionHouse
+    local origAHFrame = _G.AuctionHouseFrame
+    local origAuctionFrame = _G.AuctionFrame
+    local origGetInboxNumItems = _G.GetInboxNumItems
+    local origERR_WON = _G.ERR_AUCTION_WON_S
+
+    _G.PF.AHVerifier.ClearPurchasedTracker()
+
+    -- 28A. Direct Zero-Taint 'Craft Nx' Button (Intermediate Sub-Rows & Final Craft Footer)
+    _G.GetNumTradeSkills = function() return 0 end
+    local currentOpenProfId28 = nil
+    local openedTradeSkills28 = {}
+    local openedRecipes28 = {}
+    local craftedCalls28 = {}
+
+    _G.ProfessionsFrame = _G.CreateFrame("Frame", "ProfessionsFrame", _G.UIParent)
+    _G.ProfessionsFrame:Hide()
+
+    _G.C_TradeSkillUI = {
+        IsTradeSkillLinked = function() return false end,
+        IsTradeSkillGuild = function() return false end,
+        IsTradeSkillReady = function() return currentOpenProfId28 ~= nil end,
+        GetBaseProfessionInfo = function()
+            if not currentOpenProfId28 then return nil end
+            return { professionID = currentOpenProfId28, parentProfessionID = currentOpenProfId28 }
+        end,
+        GetProfessionInfoByRecipeID = function(rId)
+            if rId == 10098 then return { professionID = 186, professionName = "Mining", parentProfessionID = 186, parentProfessionName = "Mining" } end
+            if rId == 9995 then return { professionID = 164, professionName = "Blacksmithing", parentProfessionID = 164, parentProfessionName = "Blacksmithing" } end
+            return nil
+        end,
+        OpenTradeSkill = function(skillId)
+            table.insert(openedTradeSkills28, skillId)
+            currentOpenProfId28 = skillId
+            _G.ProfessionsFrame:Show()
+            return true
+        end,
+        OpenRecipe = function(rId)
+            table.insert(openedRecipes28, rId)
+            return true
+        end,
+        CraftRecipe = function(rId, qty)
+            table.insert(craftedCalls28, { recipeId = rId, quantity = qty })
+            return true
+        end,
+    }
+
+    local tsGauntletsOpp = {
+        id = "CRAFT_AH:7938",
+        actionType = "CRAFT_AH",
+        actionLabel = "Craft and AH",
+        itemId = 7938,
+        itemName = "Truesilver Gauntlets",
+        itemLink = "|cff1eff00|Hitem:7938:0:0:0|h[Truesilver Gauntlets]|h|r",
+        quantity = 2,
+        totalCost = 59349,
+        totalNetRevenue = 86888,
+        totalProfit = 27539,
+        roiPercent = 46,
+        verified = true,
+        recipe = {
+            recipeId = 9995, name = "Truesilver Gauntlets", profession = "Blacksmithing", professionId = 164,
+            outputItemId = 7938, avgMade = 1,
+            reagents = {
+                { itemId = 6037, name = "Truesilver Bar", count = 8 },
+                { itemId = 7909, name = "Aquamarine", count = 3 },
+            },
+        },
+        intermediateSteps = {
+            {
+                recipeId = 10098, recipeName = "Smelt Truesilver", profession = "Mining", professionId = 186,
+                outputItemId = 6037, outputName = "Truesilver Bar", outputLink = "[Truesilver Bar]",
+                countPerUnit = 8, totalQuantity = 16, avgMade = 1,
+                reagents = { { itemId = 7911, name = "Truesilver Ore", countPerBatch = 1 } },
+            },
+        },
+        shoppingList = {
+            { itemId = 7911, name = "Truesilver Ore", link = "[Truesilver Ore]", source = "AH", countPerUnit = 8, directQuantity = 0, totalQuantity = 16, avgUnitPrice = 1285, minUnitPrice = 1285, maxUnitPrice = 1285, totalCost = 20560 },
+            { itemId = 7909, name = "Aquamarine", link = "[Aquamarine]", source = "AH", countPerUnit = 3, directQuantity = 6, totalQuantity = 6, avgUnitPrice = 1150, minUnitPrice = 1150, maxUnitPrice = 1173, totalCost = 6900 },
+        },
+    }
+
+    Mock.bagCounts[7911] = 0
+    Mock.bagCounts[6037] = 0
+    Mock.bagCounts[7909] = 0
+    _G.PF.DetailWindow.ShowOpportunity(tsGauntletsOpp)
+    local rows28 = _G.PF.DetailWindow.frame.shoppingRows
+    -- Row 1: Truesilver Ore (SHOP), Row 2: Truesilver Bar (CRAFT), Row 3: Aquamarine (SHOP)
+    Assert(rows28[2].craftNowBtn:IsShown() == false, "Craft sub-row hides Craft Nx button when raw ores are not yet in bags")
+    Assert(_G.PF.DetailWindow.frame.craftFinalBtn:IsShown() == false, "Footer hides final Craft Nx button when final mats are not yet in bags")
+
+    -- Loot 16 Truesilver Ore into bags -> sub-row shows "Craft 16x" alongside "Open Mining"
+    Mock.bagCounts[7911] = 16
+    _G.PF.DetailWindow.RefreshIfShown()
+    Assert(rows28[2].craftNowBtn:IsShown() == true and rows28[2].craftNowBtn:GetText() == "Craft 16x", "Craft sub-row displays 'Craft 16x' button once 16 Truesilver Ore are in bags")
+    Assert(rows28[2].craftBtn:IsShown() == true and rows28[2].craftBtn:GetText() == "Open Mining", "Craft sub-row keeps 'Open Mining' button alongside 'Craft 16x'")
+
+    -- Click 1 while Mining is closed: opens Mining cleanly without blindly calling CraftRecipe
+    rows28[2].craftNowBtn:Click()
+    Assert(#openedTradeSkills28 == 1 and openedTradeSkills28[1] == 186 and #craftedCalls28 == 0, "First click on 'Craft 16x' when Mining is closed opens Mining (186) to Smelt Truesilver")
+
+    -- Click 2 now that Mining is open: directly calls C_TradeSkillUI.CraftRecipe(10098, 16)
+    rows28[2].craftNowBtn:Click()
+    Assert(#craftedCalls28 == 1 and craftedCalls28[1].recipeId == 10098 and craftedCalls28[1].quantity == 16, "Second click on 'Craft 16x' directly calls C_TradeSkillUI.CraftRecipe(10098, 16)")
+
+    -- Once 16 Truesilver Bars + 6 Aquamarines are in bags: sub-row shows checkmark & hides Craft 16x; footer shows "Craft 2x"
+    Mock.bagCounts[7911] = 0
+    Mock.bagCounts[6037] = 16
+    Mock.bagCounts[7909] = 6
+    _G.PF.DetailWindow.RefreshIfShown()
+    Assert(rows28[2].craftNowBtn:IsShown() == false, "Craft sub-row hides Craft Nx once all 16/16 Truesilver Bars are crafted")
+    Assert(rows28[2].itemText:GetText():find("ReadyCheck%-Ready") ~= nil, "Completed Craft sub-row displays green checkmark icon")
+    Assert(_G.PF.DetailWindow.frame.craftFinalBtn:IsShown() == true and _G.PF.DetailWindow.frame.craftFinalBtn:GetText() == "Craft 2x", "Footer displays 'Craft 2x' button when final Blacksmithing reagents are ready")
+
+    -- Footer 'Craft 2x': Click 1 switches from Mining -> Blacksmithing (164), Click 2 crafts 2x Truesilver Gauntlets
+    _G.PF.DetailWindow.frame.craftFinalBtn:Click()
+    Assert(currentOpenProfId28 == 164 and #craftedCalls28 == 1, "Footer 'Craft 2x' opens Blacksmithing (164) first when window was still on Mining")
+    _G.PF.DetailWindow.frame.craftFinalBtn:Click()
+    Assert(#craftedCalls28 == 2 and craftedCalls28[2].recipeId == 9995 and craftedCalls28[2].quantity == 2, "Footer 'Craft 2x' directly calls C_TradeSkillUI.CraftRecipe(9995, 2) once Blacksmithing is open")
+
+    -- Combat lockdown refuses CraftRecipe safely
+    _G.InCombatLockdown = function() return true end
+    local combatOk28, combatReason28 = _G.PF.RecipeScanner.CraftRecipe(tsGauntletsOpp.recipe, 2)
+    Assert(combatOk28 == false and combatReason28 == "COMBAT", "CraftRecipe refuses to run during combat lockdown")
+    _G.InCombatLockdown = origInCombat
+
+    -- 28B. CHAT_MSG_SYSTEM ERR_AUCTION_WON_S parsing
+    _G.ERR_AUCTION_WON_S = "You won an auction for %s"
+    local pName1, pQty1 = _G.PF.AHVerifier.ParseAuctionWonMessage("You won an auction for Mithril Ore (x29)")
+    Assert(pName1 == "Mithril Ore" and pQty1 == 29, "ParseAuctionWonMessage extracts commodity name and stack count (Mithril Ore x29)")
+    local pName2, pQty2 = _G.PF.AHVerifier.ParseAuctionWonMessage("You won an auction for Guardian Gloves")
+    Assert(pName2 == "Guardian Gloves" and pQty2 == 1, "ParseAuctionWonMessage extracts single-item name and quantity 1 (Guardian Gloves)")
+    local pName3, pQty3 = _G.PF.AHVerifier.ParseAuctionWonMessage("You won an auction for Guardian Gloves of the Bear")
+    Assert(pName3 == "Guardian Gloves of the Bear" and pQty3 == 1, "ParseAuctionWonMessage extracts random-suffix BoE item name")
+
+    -- 28C. Server-Confirmed Commodity & Single-Item Purchase Tracking, Deduplication, Double-Buy Guard, and Bag/Mail Reconciliation
+    _G.PF.AHVerifier.ClearPurchasedTracker()
+    Mock.bagCounts[3858] = 0
+    Mock.bagCounts[5963] = 0
+    _G.AuctionFrame = nil
+    _G.AuctionHouseFrame = _G.CreateFrame("Frame", "AuctionHouseFrame", _G.UIParent)
+    _G.AuctionHouseFrame:Show()
+
+    local ahThrottleReady28 = true
+    local startCommCalls28 = 0
+    local confirmCommCalls28 = 0
+    local placeBidCalls28 = {}
+
+    _G.C_AuctionHouse = {
+        MakeItemKey = function(id) return { itemID = id, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 } end,
+        GetItemKeyInfo = function(key) return { itemID = key.itemID, isCommodity = (key.itemID == 3858) } end,
+        IsThrottledMessageSystemReady = function() return ahThrottleReady28 end,
+        GetNumCommoditySearchResults = function(id) return (id == 3858) and 1 or 0 end,
+        GetCommoditySearchResultInfo = function(id, idx)
+            if id == 3858 and idx == 1 then return { unitPrice = 932, quantity = 60 } end
+            return nil
+        end,
+        StartCommoditiesPurchase = function() startCommCalls28 = startCommCalls28 + 1 end,
+        ConfirmCommoditiesPurchase = function() confirmCommCalls28 = confirmCommCalls28 + 1 end,
+        GetNumItemSearchResults = function(key) return (key and key.itemID == 5963) and 4 or 0 end,
+        GetItemSearchResultInfo = function(key, idx)
+            if key and key.itemID == 5963 then
+                local auctions = {
+                    { auctionID = 144878577, buyoutAmount = 1988, quantity = 1 },
+                    { auctionID = 144878498, buyoutAmount = 1988, quantity = 1 },
+                    { auctionID = 144755564, buyoutAmount = 1988, quantity = 1 },
+                    { auctionID = 144755999, buyoutAmount = 1988, quantity = 1 },
+                }
+                return auctions[idx]
+            end
+            return nil
+        end,
+        PlaceBid = function(aId, amt)
+            table.insert(placeBidCalls28, { auctionID = aId, amount = amt })
+        end,
+    }
+
+    local mixedBuyOpp = {
+        id = "CRAFT_AH:7938",
+        actionType = "CRAFT_AH",
+        actionLabel = "Craft and AH",
+        itemId = 7938,
+        itemName = "Test Play",
+        itemLink = "[Test Play]",
+        quantity = 1,
+        totalCost = 32992,
+        totalNetRevenue = 50000,
+        totalProfit = 17008,
+        roiPercent = 52,
+        verified = true,
+        shoppingList = {
+            { itemId = 3858, name = "Mithril Ore", link = "[Mithril Ore]", source = "AH", countPerUnit = 29, directQuantity = 29, totalQuantity = 29, avgUnitPrice = 932, minUnitPrice = 932, maxUnitPrice = 1000, totalCost = 27028 },
+            { itemId = 5963, name = "Guardian Gloves", link = "[Guardian Gloves]", source = "AH", countPerUnit = 3, directQuantity = 3, totalQuantity = 3, avgUnitPrice = 1988, minUnitPrice = 1988, maxUnitPrice = 2000, totalCost = 5964 },
+        },
+    }
+    _G.PF.DetailWindow.ShowOpportunity(mixedBuyOpp)
+
+    -- Commodity: Reserve 29x Mithril Ore -> Throttled Confirm does NOT count -> Failed Confirm does NOT count -> Confirmed Succeeds ONCE (deduped against chat)
+    rows28[1].buyBtn:Click()
+    Assert(startCommCalls28 == 1 and rows28[1].buyBtn:GetText() == "Confirm (29)", "Click 1 reserves 29x Mithril Ore")
+
+    ahThrottleReady28 = false
+    rows28[1].buyBtn:Click()
+    Assert(confirmCommCalls28 == 0 and rows28[1].buyBtn:GetText() == "Confirm (29)" and _G.PF.AHVerifier.GetPurchasedInMailCount(3858) == 0, "Throttled Confirm click preserves Confirm (29) and records ZERO purchased")
+
+    ahThrottleReady28 = true
+    rows28[1].buyBtn:Click()
+    Assert(confirmCommCalls28 == 1 and rows28[1].buyBtn:GetText() == "Buying..." and _G.PF.AHVerifier.GetPurchasedInMailCount(3858) == 0, "Confirm click shows 'Buying...' while awaiting server confirmation")
+
+    -- Simulate COMMODITY_PURCHASE_FAILED -> must remain 0 purchased
+    _G.PF.AHVerifier.frame:Trigger("COMMODITY_PURCHASE_FAILED")
+    Assert(_G.PF.AHVerifier.GetPurchasedInMailCount(3858) == 0 and rows28[1].buyBtn:GetText() == "Buy 29x", "COMMODITY_PURCHASE_FAILED clears in-flight state and records ZERO purchased")
+
+    -- Retry and succeed via COMMODITY_PURCHASE_SUCCEEDED + CHAT_MSG_SYSTEM (must count 29, NOT 58!)
+    rows28[1].buyBtn:Click()
+    rows28[1].buyBtn:Click()
+    _G.PF.AHVerifier.frame:Trigger("COMMODITY_PURCHASE_SUCCEEDED")
+    _G.PF.AHVerifier.frame:Trigger("CHAT_MSG_SYSTEM", "You won an auction for Mithril Ore (x29)")
+    Assert(_G.PF.AHVerifier.GetPurchasedInMailCount(3858) == 29, "COMMODITY_PURCHASE_SUCCEEDED + CHAT_MSG_SYSTEM deduplicates to exactly 29 (never 58)")
+    Assert(rows28[1].buyBtn:GetText() == "Bought", "Fully purchased commodity row button changes to 'Bought'")
+    Assert(rows28[1].itemText:GetText():find("ReadyCheck%-Ready") ~= nil, "Fully purchased commodity row displays green checkmark icon")
+    Assert(rows28[1].statusText:GetText():find("Purchased: 29 / 29 %(Check Mail%)") ~= nil, "Fully purchased commodity row status shows 'Purchased: 29 / 29 (Check Mail)'")
+
+    -- Double-buy protection: clicking 'Bought' must NOT call StartCommoditiesPurchase
+    local prevStartComm = startCommCalls28
+    rows28[1].buyBtn:Click()
+    Assert(startCommCalls28 == prevStartComm, "Clicking 'Bought' blocks accidental double-buying of Mithril Ore")
+
+    -- RevalidateActiveOpportunity after buying out Mithril Ore must NOT mark play [No Longer Profitable]
+    _G.C_AuctionHouse.GetCommoditySearchResultInfo = function(id, idx)
+        if id == 3858 and idx == 1 then return { unitPrice = 99999, quantity = 10 } end
+        return nil
+    end
+    _G.PF.AHVerifier.frame:Trigger("COMMODITY_SEARCH_RESULTS_UPDATED", 3858)
+    Assert(not mixedBuyOpp._liveUnprofitable, "Buying out cheap Mithril Ore does NOT falsely flag already-purchased play as [No Longer Profitable]")
+
+    -- Single-item non-commodity flow: 3x Guardian Gloves with throttle retry, reverse event order, and random-suffix BoE chat message
+    rows28[2].buyBtn:Click()
+    Assert(#placeBidCalls28 == 1 and placeBidCalls28[1].auctionID == 144878577 and _G.PF.AHVerifier.GetPurchasedInMailCount(5963) == 0, "PlaceBid #1 waits for server confirmation before marking bought")
+    _G.PF.AHVerifier.frame:Trigger("AUCTION_HOUSE_PURCHASE_COMPLETED", 144878577)
+    _G.PF.AHVerifier.frame:Trigger("CHAT_MSG_SYSTEM", "You won an auction for Guardian Gloves")
+    Assert(_G.PF.AHVerifier.GetPurchasedInMailCount(5963) == 1, "Guardian Gloves #1 confirmed by event + chat deduplicates to 1")
+    Assert(rows28[2].statusText:GetText():find("Bought: 1 / 3 %(in mail%)") ~= nil, "Partial buy shows 'Bought: 1 / 3 (in mail) — Buy 2'")
+
+    -- Throttled Click 2 must NOT submit PlaceBid or increment bought count
+    ahThrottleReady28 = false
+    rows28[2].buyBtn:Click()
+    Assert(#placeBidCalls28 == 1 and _G.PF.AHVerifier.GetPurchasedInMailCount(5963) == 1, "Throttled single-item buy leaves Guardian Gloves at 1 / 3")
+
+    -- Retry Click 2: CHAT_MSG_SYSTEM arrives BEFORE AUCTION_HOUSE_PURCHASE_COMPLETED (reverse order dedup!)
+    ahThrottleReady28 = true
+    rows28[2].buyBtn:Click()
+    Assert(#placeBidCalls28 == 2 and placeBidCalls28[2].auctionID == 144878498, "Retry #2 submits next auctionID #144878498")
+    _G.PF.AHVerifier.frame:Trigger("CHAT_MSG_SYSTEM", "You won an auction for Guardian Gloves")
+    _G.PF.AHVerifier.frame:Trigger("AUCTION_HOUSE_PURCHASE_COMPLETED", 144878498)
+    Assert(_G.PF.AHVerifier.GetPurchasedInMailCount(5963) == 2, "Reverse-order chat + event deduplicates cleanly to 2 / 3")
+
+    -- Click 3: confirmed by random-suffix BoE system message ("Guardian Gloves of the Bear")
+    rows28[2].buyBtn:Click()
+    Assert(#placeBidCalls28 == 3 and placeBidCalls28[3].auctionID == 144755564, "Buy #3 submits auctionID #144755564")
+    _G.PF.AHVerifier.frame:Trigger("CHAT_MSG_SYSTEM", "You won an auction for Guardian Gloves of the Bear")
+    Assert(_G.PF.AHVerifier.GetPurchasedInMailCount(5963) == 3, "Random-suffix 'Guardian Gloves of the Bear' resolves to Guardian Gloves (3 / 3)")
+    Assert(rows28[2].buyBtn:GetText() == "Bought", "3 / 3 Guardian Gloves button switches to 'Bought'")
+    Assert(rows28[2].itemText:GetText():find("ReadyCheck%-Ready") ~= nil, "3 / 3 Guardian Gloves displays green checkmark icon")
+
+    -- Accidental Click 4 on 'Bought' Guardian Gloves is blocked!
+    rows28[2].buyBtn:Click()
+    Assert(#placeBidCalls28 == 3, "Clicking 'Bought' on 3/3 Guardian Gloves prevents accidentally buying a 4th pair")
+
+    -- Bag-loot reconciliation: looting 15 then 14 Mithril Ore transitions In Mail -> Bags smoothly
+    Mock.bagCounts[3858] = 15
+    _G.PF.DetailWindow.frame:Trigger("BAG_UPDATE")
+    Assert(_G.PF.AHVerifier.GetPurchasedInMailCount(3858) == 14, "Looting 15 Mithril Ore from mail decrements in-mail count from 29 -> 14")
+    Assert(rows28[1].statusText:GetText():find("15 bags %+ 14 mail") ~= nil, "Status shows split '15 bags + 14 mail' during partial mailbox loot")
+
+    Mock.bagCounts[3858] = 29
+    _G.PF.DetailWindow.frame:Trigger("BAG_UPDATE")
+    Assert(_G.PF.AHVerifier.GetPurchasedInMailCount(3858) == 0, "Looting remaining 14 Mithril Ore clears in-mail count to 0")
+    Assert(rows28[1].buyBtn:GetText() == "Ready" and rows28[1].statusText:GetText():find("Ready: 29 / 29") ~= nil, "Row smoothly transitions from 'Bought' -> 'Ready: 29 / 29' once looted")
+
+    -- Empty mailbox auto-clears stale in-mail entries
+    Mock.currentTime = Mock.currentTime + 10
+    _G.GetInboxNumItems = function() return 0, 0 end
+    _G.PF.AHVerifier.frame:Trigger("MAIL_INBOX_UPDATE")
+    Assert(_G.PF.AHVerifier.GetPurchasedInMailCount(5963) == 0, "Empty mailbox on MAIL_INBOX_UPDATE clears remaining in-mail entries")
+
+    -- Restore globals
+    _G.PF.AHVerifier.ClearPurchasedTracker()
+    Mock.bagCounts[3858] = 0
+    Mock.bagCounts[5963] = 0
+    Mock.bagCounts[7911] = 0
+    Mock.bagCounts[6037] = 0
+    Mock.bagCounts[7909] = 0
+    _G.C_TradeSkillUI = origCTradeSkillUI
+    _G.ProfessionsFrame = origProfFrame
+    _G.GetNumTradeSkills = origGetNumTradeSkills
+    _G.InCombatLockdown = origInCombat
+    _G.C_AuctionHouse = origCAH
+    _G.AuctionHouseFrame = origAHFrame
+    _G.AuctionFrame = origAuctionFrame
+    _G.GetInboxNumItems = origGetInboxNumItems
+    _G.ERR_AUCTION_WON_S = origERR_WON
+end
+
+-- 29. Regression Test: In-Progress Play Quantity Lock (3x Truesilver Gauntlets Never Shrinks to 2x) & Dynamic Margin-Adjusted Max Unit Price (O(K) Fast Path)
+do
+    local origPlayerMoney = Mock.playerMoney
+    local origCAH = _G.C_AuctionHouse
+    local origAHFrame = _G.AuctionHouseFrame
+    local origAuctionFrame = _G.AuctionFrame
+    local origFindTop = _G.PF.OpportunityEngine.FindTopOpportunities
+    local origReeval = _G.PF.OpportunityEngine.ReevaluateSingleOpportunity
+
+    _G.PF.AHVerifier.ClearPurchasedTracker()
+    _G.Profitable_DB.orderBookCache = {}
+    Mock.playerMoney = 100000 -- 10g starting wallet
+    Mock.bagCounts[3858] = 1  -- 1 Mithril Ore already in bags (so 29 needed for 3x = 30 total)
+    Mock.bagCounts[7911] = 0
+    Mock.bagCounts[7909] = 0
+    Mock.bagCounts[3864] = 0
+    Mock.bagCounts[5963] = 0
+    Mock.bagCounts[7912] = 0
+
+    local solidStoneLivePrice29 = 220 -- Ticked up from 1s 66c -> 2s 20c on volatile AH!
+    local startedStoneBuy29 = nil
+    local findTopCalls29 = 0
+    local reevalCalls29 = 0
+
+    _G.PF.OpportunityEngine.FindTopOpportunities = function(...)
+        findTopCalls29 = findTopCalls29 + 1
+        return origFindTop(...)
+    end
+    _G.PF.OpportunityEngine.ReevaluateSingleOpportunity = function(...)
+        reevalCalls29 = reevalCalls29 + 1
+        return origReeval(...)
+    end
+
+    _G.AuctionFrame = nil
+    _G.AuctionHouseFrame = _G.CreateFrame("Frame", "AuctionHouseFrame", _G.UIParent)
+    _G.AuctionHouseFrame:Show()
+    _G.C_AuctionHouse = {
+        MakeItemKey = function(id) return { itemID = id, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 } end,
+        GetItemKeyInfo = function(key) return { itemID = key.itemID, isCommodity = true } end,
+        IsThrottledMessageSystemReady = function() return true end,
+        GetNumCommoditySearchResults = function(id) return (id == 7912) and 1 or 0 end,
+        GetCommoditySearchResultInfo = function(id, idx)
+            if id == 7912 and idx == 1 then
+                return { unitPrice = solidStoneLivePrice29, quantity = 60 }
+            end
+            return nil
+        end,
+        StartCommoditiesPurchase = function(id, qty)
+            startedStoneBuy29 = { itemId = id, quantity = qty }
+        end,
+        ConfirmCommoditiesPurchase = function() end,
+    }
+
+    local gauntlets3x = {
+        id = "CRAFT_AH:7938",
+        actionType = "CRAFT_AH",
+        actionLabel = "Craft and AH",
+        itemId = 7938,
+        itemName = "Truesilver Gauntlets",
+        itemLink = "|cff1eff00|Hitem:7938:0:0:0|h[Truesilver Gauntlets]|h|r",
+        quantity = 3,
+        unitNetRevenue = 43444,   -- 4g 34s 44c net per craft
+        totalNetRevenue = 130332, -- 13g 03s 32c net for 3x!
+        totalCost = 88172,        -- ~8g 81s 72c planned
+        totalProfit = 42160,      -- ~4g 21s 60c profit
+        roiPercent = 48,
+        verified = true,
+        recipe = {
+            recipeId = 9995, name = "Truesilver Gauntlets", profession = "Blacksmithing", professionId = 164,
+            outputItemId = 7938, avgMade = 1,
+            reagents = {
+                { itemId = 3860, name = "Mithril Bar", count = 10 },
+                { itemId = 6037, name = "Truesilver Bar", count = 8 },
+                { itemId = 7909, name = "Aquamarine", count = 3 },
+                { itemId = 3864, name = "Citrine", count = 3 },
+                { itemId = 5963, name = "Guardian Gloves", count = 1 },
+                { itemId = 7966, name = "Solid Grinding Stone", count = 2 },
+            },
+        },
+        intermediateSteps = {
+            {
+                recipeId = 10097, recipeName = "Smelt Mithril", profession = "Mining", professionId = 186,
+                outputItemId = 3860, outputName = "Mithril Bar", countPerUnit = 10, totalQuantity = 30, avgMade = 1,
+                reagents = { { itemId = 3858, name = "Mithril Ore", countPerBatch = 1 } },
+            },
+            {
+                recipeId = 10098, recipeName = "Smelt Truesilver", profession = "Mining", professionId = 186,
+                outputItemId = 6037, outputName = "Truesilver Bar", countPerUnit = 8, totalQuantity = 24, avgMade = 1,
+                reagents = { { itemId = 7911, name = "Truesilver Ore", countPerBatch = 1 } },
+            },
+            {
+                recipeId = 9920, recipeName = "Solid Grinding Stone", profession = "Blacksmithing", professionId = 164,
+                outputItemId = 7966, outputName = "Solid Grinding Stone", countPerUnit = 2, totalQuantity = 6, avgMade = 1,
+                reagents = { { itemId = 7912, name = "Solid Stone", countPerBatch = 4 } },
+            },
+        },
+        shoppingList = {
+            { itemId = 3858, name = "Mithril Ore",     link = "[Mithril Ore]",     source = "AH", countPerUnit = 10, directQuantity = 0, totalQuantity = 30, avgUnitPrice = 932,  minUnitPrice = 932,  maxUnitPrice = 932,  totalCost = 27960 },
+            { itemId = 7911, name = "Truesilver Ore",  link = "[Truesilver Ore]",  source = "AH", countPerUnit = 8,  directQuantity = 0, totalQuantity = 24, avgUnitPrice = 1285, minUnitPrice = 1285, maxUnitPrice = 1285, totalCost = 30840 },
+            { itemId = 7909, name = "Aquamarine",      link = "[Aquamarine]",      source = "AH", countPerUnit = 3,  directQuantity = 9, totalQuantity = 9,  avgUnitPrice = 1162, minUnitPrice = 1150, maxUnitPrice = 1173, totalCost = 10465 },
+            { itemId = 3864, name = "Citrine",         link = "[Citrine]",         source = "AH", countPerUnit = 3,  directQuantity = 9, totalQuantity = 9,  avgUnitPrice = 1099, minUnitPrice = 1099, maxUnitPrice = 1099, totalCost = 9891  },
+            { itemId = 5963, name = "Guardian Gloves", link = "[Guardian Gloves]", source = "AH", countPerUnit = 1,  directQuantity = 3, totalQuantity = 3,  avgUnitPrice = 1988, minUnitPrice = 1988, maxUnitPrice = 1988, totalCost = 5964  },
+            { itemId = 7912, name = "Solid Stone",     link = "[Solid Stone]",     source = "AH", countPerUnit = 8,  directQuantity = 0, totalQuantity = 24, avgUnitPrice = 166,  minUnitPrice = 166,  maxUnitPrice = 166,  totalCost = 3984  },
+        },
+    }
+
+    _G.PF.DetailWindow.ShowOpportunity(gauntlets3x)
+
+    -- Confirm purchases of the first 5 reagents (8g 41s 88c spent -> wallet drops to 1g 58s 12c!)
+    _G.PF.AHVerifier.RecordConfirmedPurchase(3858, "Mithril Ore",     29, "EVENT", 27028)
+    _G.PF.AHVerifier.RecordConfirmedPurchase(7911, "Truesilver Ore",  24, "EVENT", 30840)
+    _G.PF.AHVerifier.RecordConfirmedPurchase(7909, "Aquamarine",       9, "EVENT", 10465)
+    _G.PF.AHVerifier.RecordConfirmedPurchase(3864, "Citrine",          9, "EVENT", 9891)
+    _G.PF.AHVerifier.RecordConfirmedPurchase(5963, "Guardian Gloves",  3, "EVENT", 5964)
+    Mock.playerMoney = 100000 - (27028 + 30840 + 10465 + 9891 + 5964) -- 1g 58s 12c left!
+
+    -- Now open Solid Stone (live price ticked up from 1s 66c -> 2s 20c, and wallet only has 1g 58s left!)
+    findTopCalls29 = 0
+    reevalCalls29 = 0
+    _G.PF.AHVerifier.frame:Trigger("COMMODITY_SEARCH_RESULTS_UPDATED", 7912)
+
+    Assert(findTopCalls29 == 0 and reevalCalls29 == 0, "In-progress revalidation runs in O(K) with ZERO FindTopOpportunities or ReevaluateSingleOpportunity scans")
+    Assert(_G.Profitable_DB.activePlay.quantity == 3, "Target quantity stays LOCKED at 3x (never shrinks to 2x because earlier purchases reduced wallet gold)")
+    local stoneShop29 = _G.Profitable_DB.activePlay.shoppingList[6]
+    Assert(stoneShop29.remainingToBuy == 24, "Solid Stone still requests all 24x needed for 3x Truesilver Gauntlets (not 16x)")
+    Assert(stoneShop29.effectiveMaxUnitPrice == 332, "Solid Stone dynamic max unit price expands cleanly to 3s 32c (2x planned, within 4g+ remaining headroom)")
+    Assert(_G.Profitable_DB.activePlay._liveUnprofitable == false, "Play remains profitable when Solid Stone ticks up to 2s 20c (within dyn max 3s 32c)")
+
+    -- Find Solid Stone row in DetailWindow and verify Buy 24x works at 2s 20c!
+    local stoneRow29 = nil
+    for _, r in ipairs(_G.PF.DetailWindow.frame.shoppingRows) do
+        if r._itemData and r._itemData.itemId == 7912 then stoneRow29 = r; break end
+    end
+    Assert(stoneRow29 ~= nil and stoneRow29.buyBtn:GetText() == "Buy 24x", "Solid Stone button shows 'Buy 24x' at live 2s 20c using dynamic max ceiling")
+    Assert(stoneRow29.priceText:GetText():find("within dyn max 3s 32c") ~= nil, "Solid Stone row displays 'Live AH: 2s 20c ea (within dyn max 3s 32c)'")
+    stoneRow29.buyBtn:Click()
+    Assert(startedStoneBuy29 ~= nil and startedStoneBuy29.itemId == 7912 and startedStoneBuy29.quantity == 24, "Clicking 'Buy 24x' reserves all 24x Solid Stone @ 2s 20c")
+
+    -- Verify absurd spike (Solid Stone @ 50s > 3s 32c cap) is STILL rejected and flagged!
+    solidStoneLivePrice29 = 5000
+    startedStoneBuy29 = nil
+    _G.PF.AHVerifier.frame:Trigger("COMMODITY_SEARCH_RESULTS_UPDATED", 7912)
+    Assert(_G.Profitable_DB.activePlay._liveUnprofitable == true, "Absurd 50s Solid Stone spike exceeds 3s 32c volatility cap and flags play")
+    Assert(stoneRow29.priceText:GetText():find("above max 3s 32c") ~= nil, "Solid Stone row warns 'above max 3s 32c' when spiked to 50s")
+
+    -- Restore globals
+    _G.PF.AHVerifier.ClearPurchasedTracker()
+    Mock.playerMoney = origPlayerMoney
+    Mock.bagCounts[3858] = 0
+    _G.C_AuctionHouse = origCAH
+    _G.AuctionHouseFrame = origAHFrame
+    _G.AuctionFrame = origAuctionFrame
+    _G.PF.OpportunityEngine.FindTopOpportunities = origFindTop
+    _G.PF.OpportunityEngine.ReevaluateSingleOpportunity = origReeval
+end
+
 print("\nAll Profitable test assertions passed successfully!")

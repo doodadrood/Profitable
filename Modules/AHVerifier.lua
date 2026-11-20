@@ -34,7 +34,11 @@ local openSearchToken = 0
 local pendingOpenItemKey = nil      -- { itemId, itemKey, itemKeyInfo, desiredQuantity, token }
 local pendingSearchCheck = nil      -- { itemId, itemKey, itemKeyInfo, desiredQuantity, token, retries }
 local pendingCommodityConfirm = nil -- { itemId, itemName, quantity, unitPrice, totalPrice, maxUnitPrice }
-local purchasedAuctionIds = {}      -- [auctionID] = true (prevents bidding on the same auctionID twice)
+local inFlightCommodityPurchase = nil -- { itemId, itemName, quantity, unitPrice, totalPrice, sentAt }
+local inFlightItemPurchases = {}      -- [auctionID] = { itemId, itemName, quantity, buyout, sentAt }
+local purchaseDedupQueue = {}         -- FIFO { source = "EVENT"|"CHAT", itemId, qty, expiresAt }
+local purchasedAuctionIds = {}        -- [auctionID] = true (prevents bidding on the same auctionID twice)
+local PURCHASED_MAIL_TTL_SECONDS = 7200
 
 local function SafeRegisterEvent(frame, eventName)
     if frame and frame.RegisterEvent then
@@ -1149,6 +1153,260 @@ function PF.AHVerifier.OpenNextNeededItemInDefaultAH(opp)
     end
 end
 
+local function GetCharPurchasedMailTable(createIfMissing)
+    if type(Profitable_DB) ~= "table" then return nil end
+    if type(Profitable_DB.purchasedInMail) ~= "table" then
+        if not createIfMissing then return nil end
+        Profitable_DB.purchasedInMail = {}
+    end
+    local charKey = PF.GetCharacterKey()
+    if type(Profitable_DB.purchasedInMail[charKey]) ~= "table" then
+        if not createIfMissing then return nil end
+        Profitable_DB.purchasedInMail[charKey] = {}
+    end
+    return Profitable_DB.purchasedInMail[charKey]
+end
+
+local function PrunePurchaseDedup(now)
+    local kept = {}
+    for _, entry in ipairs(purchaseDedupQueue) do
+        if entry.expiresAt and entry.expiresAt > now then
+            table.insert(kept, entry)
+        end
+    end
+    purchaseDedupQueue = kept
+end
+
+function PF.AHVerifier.ClearPurchasedTracker(itemId)
+    local tbl = GetCharPurchasedMailTable(false)
+    if tbl then
+        if itemId then
+            tbl[itemId] = nil
+        else
+            local charKey = PF.GetCharacterKey()
+            Profitable_DB.purchasedInMail[charKey] = {}
+        end
+    end
+    if not itemId then
+        inFlightCommodityPurchase = nil
+        inFlightItemPurchases = {}
+        purchaseDedupQueue = {}
+    end
+end
+
+-- Returns the server-confirmed purchased quantity (and actual copper spent) currently
+-- awaiting mailbox pickup, automatically decrementing as items arrive in bags on loot.
+function PF.AHVerifier.GetPurchasedInMailInfo(itemId)
+    if not itemId or itemId <= 0 then return 0, 0 end
+    local tbl = GetCharPurchasedMailTable(false)
+    if not tbl then return 0, 0 end
+    local entry = tbl[itemId]
+    if type(entry) ~= "table" or (entry.count or 0) <= 0 then
+        tbl[itemId] = nil
+        return 0, 0
+    end
+    local now = (_G.time and _G.time()) or 0
+    if (now - (entry.updatedAt or 0)) > PURCHASED_MAIL_TTL_SECONDS then
+        tbl[itemId] = nil
+        return 0, 0
+    end
+    local currentBags = PF.Formatter.GetInventoryCount(itemId, false)
+    if type(entry.lastBagCount) == "number" and currentBags > entry.lastBagCount then
+        local oldCount = entry.count or 0
+        local gained = currentBags - entry.lastBagCount
+        local newCount = math.max(0, oldCount - gained)
+        if type(entry.spentCopper) == "number" and entry.spentCopper > 0 and oldCount > 0 then
+            entry.spentCopper = math.floor((entry.spentCopper * (newCount / oldCount)) + 0.5)
+        end
+        entry.count = newCount
+    end
+    entry.lastBagCount = currentBags
+    if entry.count <= 0 then
+        tbl[itemId] = nil
+        return 0, 0
+    end
+    return entry.count, tonumber(entry.spentCopper) or 0
+end
+
+function PF.AHVerifier.GetPurchasedInMailCount(itemId)
+    local count = PF.AHVerifier.GetPurchasedInMailInfo(itemId)
+    return count
+end
+
+-- Records a server-confirmed AH purchase (waiting in mailbox) with symmetric FIFO
+-- deduplication between API purchase events ("EVENT") and CHAT_MSG_SYSTEM ("CHAT").
+function PF.AHVerifier.RecordConfirmedPurchase(itemId, itemName, qty, source, spentCopper)
+    qty = math.floor(tonumber(qty) or 0)
+    if not itemId or itemId <= 0 or qty <= 0 then
+        return false
+    end
+    local now = (_G.GetTime and _G.GetTime()) or (_G.time and _G.time()) or 0
+    PrunePurchaseDedup(now)
+
+    if source == "EVENT" or source == "CHAT" then
+        local opposite = (source == "EVENT") and "CHAT" or "EVENT"
+        for idx, tok in ipairs(purchaseDedupQueue) do
+            if tok.source == opposite and tok.itemId == itemId and tok.qty == qty then
+                table.remove(purchaseDedupQueue, idx)
+                return false
+            end
+        end
+        table.insert(purchaseDedupQueue, {
+            source = source,
+            itemId = itemId,
+            qty = qty,
+            expiresAt = now + 6.0,
+        })
+    end
+
+    local tbl = GetCharPurchasedMailTable(true)
+    if not tbl then return false end
+
+    local existingCount, existingSpent = PF.AHVerifier.GetPurchasedInMailInfo(itemId)
+    local currentBags = PF.Formatter.GetInventoryCount(itemId, false)
+    local addedSpent = (type(spentCopper) == "number" and spentCopper > 0) and math.floor(spentCopper) or 0
+    tbl[itemId] = {
+        count = existingCount + qty,
+        spentCopper = existingSpent + addedSpent,
+        itemName = itemName,
+        updatedAt = (_G.time and _G.time()) or 0,
+        lastBagCount = currentBags,
+    }
+
+    -- Lock target quantity & record actual spend on activePlay so mid-play revalidation
+    -- never shrinks an in-progress craft (e.g., 3x -> 2x) after earlier reagents are bought!
+    local activeOpp = Profitable_DB and Profitable_DB.activePlay
+    if type(activeOpp) == "table" and type(activeOpp.shoppingList) == "table" then
+        for _, shop in ipairs(activeOpp.shoppingList) do
+            if shop and shop.itemId == itemId then
+                activeOpp._hasActivePurchases = true
+                activeOpp._lockedSpentByItem = activeOpp._lockedSpentByItem or {}
+                local rec = activeOpp._lockedSpentByItem[itemId] or { qty = 0, spentCopper = 0 }
+                rec.qty = (rec.qty or 0) + qty
+                if addedSpent > 0 then
+                    rec.spentCopper = (rec.spentCopper or 0) + addedSpent
+                elseif shop.avgUnitPrice and shop.avgUnitPrice > 0 then
+                    rec.spentCopper = (rec.spentCopper or 0) + (shop.avgUnitPrice * qty)
+                end
+                activeOpp._lockedSpentByItem[itemId] = rec
+                break
+            end
+        end
+    end
+
+    return true
+end
+
+local function BuildAuctionWonPattern()
+    local fmt = (type(_G.ERR_AUCTION_WON_S) == "string" and _G.ERR_AUCTION_WON_S ~= "")
+        and _G.ERR_AUCTION_WON_S
+        or "You won an auction for %s"
+    local escaped = fmt:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
+    local pattern = escaped:gsub("%%%%s", "(.+)", 1)
+    return "^" .. pattern .. "%.?$"
+end
+
+-- Parses WoW system chat messages such as:
+--   "You won an auction for Mithril Ore (x29)" -> "Mithril Ore", 29, nil
+--   "You won an auction for Guardian Gloves"   -> "Guardian Gloves", 1, nil
+function PF.AHVerifier.ParseAuctionWonMessage(msg)
+    if type(msg) ~= "string" or msg == "" then
+        return nil, nil, nil
+    end
+    local wonText = msg:match(BuildAuctionWonPattern())
+    if not wonText or wonText == "" then
+        wonText = msg:match("^You won an auction for (.+)%.?$")
+    end
+    if not wonText or wonText == "" then
+        return nil, nil, nil
+    end
+
+    local qty = 1
+    local stripped, countStr = wonText:match("^(.-)%s*%(x(%d+)%)%s*$")
+    if not stripped then
+        stripped, countStr = wonText:match("^(.-)%s*%((%d+)%)%s*$")
+    end
+    if stripped and countStr then
+        wonText = stripped
+        qty = math.max(1, tonumber(countStr) or 1)
+    end
+
+    local linkedItemId = tonumber(wonText:match("item:(%d+)"))
+    local linkBracketName = wonText:match("%[(.-)%]")
+    local cleanName = linkBracketName or wonText:gsub("^%s+", ""):gsub("%s+$", "")
+    if cleanName == "" then
+        return nil, nil, nil
+    end
+    return cleanName, qty, linkedItemId
+end
+
+local function ResolvePurchasedItemIdByName(itemName, linkedItemId)
+    if linkedItemId and linkedItemId > 0 then
+        return linkedItemId
+    end
+    if type(itemName) ~= "string" or itemName == "" then
+        return nil
+    end
+    local lowerTarget = itemName:lower()
+
+    if inFlightCommodityPurchase and inFlightCommodityPurchase.itemName
+        and inFlightCommodityPurchase.itemName:lower() == lowerTarget then
+        return inFlightCommodityPurchase.itemId
+    end
+
+    for _, entry in pairs(inFlightItemPurchases) do
+        if entry and entry.itemName then
+            local eLower = entry.itemName:lower()
+            if eLower == lowerTarget or lowerTarget:sub(1, #eLower + 1) == (eLower .. " ") then
+                return entry.itemId
+            end
+        end
+    end
+
+    local function MatchInShoppingList(opp)
+        if type(opp) ~= "table" or type(opp.shoppingList) ~= "table" then return nil end
+        local prefixMatch = nil
+        for _, shop in ipairs(opp.shoppingList) do
+            if shop and shop.itemId and type(shop.name) == "string" and shop.name ~= "" then
+                local sLower = shop.name:lower()
+                if sLower == lowerTarget then
+                    return shop.itemId
+                elseif not prefixMatch and lowerTarget:sub(1, #sLower + 1) == (sLower .. " ") then
+                    prefixMatch = shop.itemId
+                end
+            end
+        end
+        return prefixMatch
+    end
+
+    if type(Profitable_DB) == "table" then
+        local fromActive = MatchInShoppingList(Profitable_DB.activePlay)
+        if fromActive then return fromActive end
+
+        if type(Profitable_DB.lastTopPlays) == "table" then
+            for _, opp in ipairs(Profitable_DB.lastTopPlays) do
+                local found = MatchInShoppingList(opp)
+                if found then return found end
+            end
+        end
+        if type(Profitable_DB.lastHonorableMentions) == "table" then
+            for _, opp in ipairs(Profitable_DB.lastHonorableMentions) do
+                local found = MatchInShoppingList(opp)
+                if found then return found end
+            end
+        end
+        if type(Profitable_DB.itemCache) == "table" then
+            for cachedId, meta in pairs(Profitable_DB.itemCache) do
+                if type(meta) == "table" and type(meta.name) == "string" and meta.name:lower() == lowerTarget then
+                    return cachedId
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
 -- Returns the dynamic label for the "Buy Next" button in DetailWindow
 function PF.AHVerifier.GetBuyButtonLabel(item)
     if not item then return "Buy Next" end
@@ -1159,15 +1417,27 @@ function PF.AHVerifier.GetBuyButtonLabel(item)
         return "Buy Vendor"
     end
     if item.remainingToBuy == 0 then
+        if item.purchasedCovered or ((item.purchasedInMail or 0) > 0 and (item.haveInBags or 0) < (item.effectiveQuantity or item.totalQuantity or 1)) then
+            return "Bought"
+        end
         return "Ready"
     end
     if pendingCommodityConfirm and pendingCommodityConfirm.itemId == item.itemId then
         return string.format("Confirm (%d)", pendingCommodityConfirm.quantity)
     end
+    if inFlightCommodityPurchase and inFlightCommodityPurchase.itemId == item.itemId then
+        local now = (_G.GetTime and _G.GetTime()) or 0
+        if (now - (inFlightCommodityPurchase.sentAt or 0)) <= 6.0 then
+            return "Buying..."
+        else
+            inFlightCommodityPurchase = nil
+        end
+    end
     if _G.C_AuctionHouse then
+        local effectiveMax = item.effectiveMaxUnitPrice or item.maxUnitPrice
         local numComm, buyQty = GetLoadedQualifyingCommodityQty(
             item.itemId,
-            item.maxUnitPrice,
+            effectiveMax,
             math.max(1, item.remainingToBuy or item.totalQuantity or 1),
             PF.Formatter.GetPlayerGold()
         )
@@ -1176,7 +1446,7 @@ function PF.AHVerifier.GetBuyButtonLabel(item)
         end
         local numItem, bestAuction = GetLoadedQualifyingItemAuction(
             item.itemId,
-            item.maxUnitPrice,
+            effectiveMax,
             PF.Formatter.GetPlayerGold()
         )
         if numItem > 0 and bestAuction then
@@ -1296,15 +1566,28 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
     if _G.C_AuctionHouse then
         -- Step 3A: Confirm a pending commodity quote from StartCommoditiesPurchase
         if pendingCommodityConfirm and pendingCommodityConfirm.itemId == itemId then
+            if _G.C_AuctionHouse.IsThrottledMessageSystemReady and not _G.C_AuctionHouse.IsThrottledMessageSystemReady() then
+                print("|cffff9900[Profitable]|r Auction House is busy — click 'Confirm' again in a moment.")
+                return false, 0, 0, "THROTTLED"
+            end
+
             local conf = pendingCommodityConfirm
             pendingCommodityConfirm = nil
+            inFlightCommodityPurchase = {
+                itemId = conf.itemId,
+                itemName = conf.itemName or itemName,
+                quantity = conf.quantity,
+                unitPrice = conf.unitPrice,
+                totalPrice = conf.totalPrice,
+                sentAt = (_G.GetTime and _G.GetTime()) or 0,
+            }
 
             if _G.C_AuctionHouse.ConfirmCommoditiesPurchase then
                 pcall(_G.C_AuctionHouse.ConfirmCommoditiesPurchase, conf.itemId, conf.quantity)
             end
 
             print(string.format(
-                "|cff00ff88[Profitable]|r Confirmed purchase of %dx [%s] for %s (%s ea)!",
+                "|cff00ff88[Profitable]|r Confirming purchase of %dx [%s] for %s (%s ea)...",
                 conf.quantity,
                 conf.itemName or itemName or ("Item #" .. itemId),
                 PF.Formatter.FormatMoney(conf.totalPrice or (conf.unitPrice * conf.quantity)),
@@ -1333,6 +1616,7 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
                 return false, 0, 0, "THROTTLED"
             end
 
+            inFlightCommodityPurchase = nil
             SetDefaultCommoditiesUIQuantity(buyQty, true)
 
             SafeRegisterEvent(verifierFrame, "COMMODITY_PRICE_UPDATED")
@@ -1389,6 +1673,13 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
             -- SearchItemOnAH (which would send a new search query and drop PlaceBid)!
             if _G.C_AuctionHouse.PlaceBid then
                 purchasedAuctionIds[bestAuction.auctionID] = true
+                inFlightItemPurchases[bestAuction.auctionID] = {
+                    itemId = itemId,
+                    itemName = itemName,
+                    quantity = 1,
+                    buyout = bestAuction.buyoutAmount,
+                    sentAt = (_G.GetTime and _G.GetTime()) or 0,
+                }
                 pcall(_G.C_AuctionHouse.PlaceBid, bestAuction.auctionID, bestAuction.buyoutAmount)
                 local qty = 1
                 print(string.format(
@@ -1426,8 +1717,14 @@ function PF.AHVerifier.Init()
     SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
     SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
     SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+    SafeRegisterEvent(verifierFrame, "AUCTION_HOUSE_PURCHASE_COMPLETED")
     SafeRegisterEvent(verifierFrame, "COMMODITY_SEARCH_RESULTS_UPDATED")
     SafeRegisterEvent(verifierFrame, "ITEM_SEARCH_RESULTS_UPDATED")
+    SafeRegisterEvent(verifierFrame, "COMMODITY_PURCHASE_SUCCEEDED")
+    SafeRegisterEvent(verifierFrame, "COMMODITY_PURCHASE_FAILED")
+    SafeRegisterEvent(verifierFrame, "COMMODITY_PRICE_UNAVAILABLE")
+    SafeRegisterEvent(verifierFrame, "CHAT_MSG_SYSTEM")
+    SafeRegisterEvent(verifierFrame, "MAIL_INBOX_UPDATE")
 
     verifierFrame:SetScript("OnEvent", function(_, event, arg1, arg2)
         if event == "AUCTION_HOUSE_CLOSED" then
@@ -1438,10 +1735,92 @@ function PF.AHVerifier.Init()
             pendingSearchCheck = nil
             pendingBrowseResolve = nil
             pendingCommodityConfirm = nil
+            inFlightCommodityPurchase = nil
+            inFlightItemPurchases = {}
             itemKeyCallbacks = {}
             ClearPendingItemKeyWatchers()
             if isRunning then
                 FinalizeRun("AH_CLOSED")
+            end
+            return
+        end
+
+        if event == "CHAT_MSG_SYSTEM" then
+            local wonName, wonQty, linkedId = PF.AHVerifier.ParseAuctionWonMessage(arg1)
+            if wonName and wonQty and wonQty > 0 then
+                local resolvedId = ResolvePurchasedItemIdByName(wonName, linkedId)
+                if resolvedId then
+                    local matchedSpent = nil
+                    if inFlightCommodityPurchase and inFlightCommodityPurchase.itemId == resolvedId
+                        and inFlightCommodityPurchase.quantity == wonQty then
+                        matchedSpent = inFlightCommodityPurchase.totalPrice
+                        inFlightCommodityPurchase = nil
+                    else
+                        for aId, entry in pairs(inFlightItemPurchases) do
+                            if entry and entry.itemId == resolvedId then
+                                matchedSpent = entry.buyout
+                                inFlightItemPurchases[aId] = nil
+                                break
+                            end
+                        end
+                    end
+                    if PF.AHVerifier.RecordConfirmedPurchase(resolvedId, wonName, wonQty, "CHAT", matchedSpent) then
+                        if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
+                            PF.DetailWindow.RefreshIfShown()
+                        end
+                    end
+                end
+            end
+            return
+        end
+
+        if event == "MAIL_INBOX_UPDATE" then
+            if _G.GetInboxNumItems then
+                local okInbox, numItems, totalItems = pcall(_G.GetInboxNumItems)
+                if okInbox and numItems == 0 and (totalItems == nil or totalItems == 0) then
+                    local tbl = GetCharPurchasedMailTable(false)
+                    if tbl then
+                        local now = (_G.time and _G.time()) or 0
+                        for mItemId, entry in pairs(tbl) do
+                            if type(entry) ~= "table" or (now - (entry.updatedAt or 0)) >= 3 then
+                                tbl[mItemId] = nil
+                            end
+                        end
+                    end
+                end
+            end
+            if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
+                PF.DetailWindow.RefreshIfShown()
+            end
+            return
+        end
+
+        if event == "AUCTION_HOUSE_PURCHASE_COMPLETED" then
+            local auctionId = tonumber(arg1) or arg1
+            local entry = (auctionId ~= nil) and inFlightItemPurchases[auctionId] or nil
+            if entry then
+                inFlightItemPurchases[auctionId] = nil
+            else
+                local now = (_G.GetTime and _G.GetTime()) or 0
+                local oldestKey, oldestTime = nil, nil
+                for aId, e in pairs(inFlightItemPurchases) do
+                    if e and (now - (e.sentAt or 0)) <= 10.0 then
+                        if not oldestTime or (e.sentAt or 0) < oldestTime then
+                            oldestKey = aId
+                            oldestTime = e.sentAt or 0
+                        end
+                    end
+                end
+                if oldestKey then
+                    entry = inFlightItemPurchases[oldestKey]
+                    inFlightItemPurchases[oldestKey] = nil
+                end
+            end
+            if entry and entry.itemId then
+                PF.AHVerifier.RecordConfirmedPurchase(entry.itemId, entry.itemName, entry.quantity or 1, "EVENT", entry.buyout)
+                if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
+                    PF.DetailWindow.RefreshIfShown()
+                end
             end
             return
         end
@@ -1498,12 +1877,24 @@ function PF.AHVerifier.Init()
             return
         elseif event == "COMMODITY_PRICE_UNAVAILABLE" or event == "COMMODITY_PURCHASE_FAILED" then
             pendingCommodityConfirm = nil
+            inFlightCommodityPurchase = nil
             if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
                 PF.DetailWindow.RefreshIfShown()
             end
             return
         elseif event == "COMMODITY_PURCHASE_SUCCEEDED" then
+            local completed = inFlightCommodityPurchase or pendingCommodityConfirm
+            inFlightCommodityPurchase = nil
             pendingCommodityConfirm = nil
+            if completed and completed.itemId then
+                local spent = completed.totalPrice or ((completed.unitPrice or 0) * (completed.quantity or 1))
+                PF.AHVerifier.RecordConfirmedPurchase(completed.itemId, completed.itemName, completed.quantity or 1, "EVENT", spent)
+                print(string.format(
+                    "|cff00ff88[Profitable]|r Purchase confirmed: %dx [%s] — check your mailbox!",
+                    completed.quantity or 1,
+                    completed.itemName or ("Item #" .. tostring(completed.itemId))
+                ))
+            end
             if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
                 PF.DetailWindow.RefreshIfShown()
             end

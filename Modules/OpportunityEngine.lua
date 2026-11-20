@@ -341,15 +341,36 @@ function PF.OpportunityEngine.ComputeLiveInventoryState(opp)
             end
 
             step.matsReadyInBags = (remToCraft > 0 and maxBatchesFromBags >= remBatches)
+            step.craftableBatchesNow = (remToCraft > 0) and math.max(0, math.min(remBatches, maxBatchesFromBags)) or 0
             step.craftableNow = (remToCraft > 0) and math.min(remToCraft, math.floor(maxBatchesFromBags * avgMade)) or 0
         end
     end
+
+    local finalCraftableBatches = 0
+    if type(opp.recipe) == "table" and type(opp.recipe.reagents) == "table" and #opp.recipe.reagents > 0 then
+        local maxFinal = units
+        for _, r in ipairs(opp.recipe.reagents) do
+            if r and r.itemId then
+                local perCast = math.max(1, math.floor(tonumber(r.count or r.countPerUnit) or 1))
+                local have = PF.Formatter.GetInventoryCount(r.itemId, false)
+                local canMake = math.floor(have / perCast)
+                if canMake < maxFinal then
+                    maxFinal = canMake
+                end
+            end
+        end
+        finalCraftableBatches = math.max(0, maxFinal)
+    end
+    opp.finalCraftableBatches = finalCraftableBatches
 
     if type(opp.shoppingList) == "table" then
         for _, item in ipairs(opp.shoppingList) do
             if type(item) == "table" and item.itemId then
                 local liveInBags = PF.Formatter.GetInventoryCount(item.itemId, false)
                 local liveInBank = math.max(0, PF.Formatter.GetInventoryCount(item.itemId, true) - liveInBags)
+                local inMail = (PF.AHVerifier and PF.AHVerifier.GetPurchasedInMailCount)
+                    and (PF.AHVerifier.GetPurchasedInMailCount(item.itemId) or 0)
+                    or 0
                 local baseTotal = math.max(0, math.floor(tonumber(item.totalQuantity) or 0))
                 local effectiveNeeded = baseTotal
 
@@ -358,16 +379,167 @@ function PF.OpportunityEngine.ComputeLiveInventoryState(opp)
                     effectiveNeeded = directQty + (neededFromStepsByItem[item.itemId] or 0)
                 end
 
+                local remToBuy = math.max(0, effectiveNeeded - liveInBags - inMail)
                 item.haveInBags = liveInBags
                 item.haveInBank = liveInBank
+                item.purchasedInMail = inMail
                 item.effectiveQuantity = effectiveNeeded
-                item.remainingToBuy = math.max(0, effectiveNeeded - liveInBags)
+                item.remainingToBuy = remToBuy
+                item.purchasedCovered = (effectiveNeeded > 0 and remToBuy == 0 and inMail > 0 and liveInBags < effectiveNeeded)
                 item.satisfiedByIntermediates = (effectiveNeeded < baseTotal)
                 item.fullySatisfiedByIntermediates = (effectiveNeeded == 0 and baseTotal > 0)
                 item.satisfyingSteps = satisfyingStepsByItem[item.itemId]
             end
         end
     end
+
+    PF.OpportunityEngine.UpdateInProgressOpportunityPricing(opp)
+end
+
+-- Ultra-fast O(K) pricing & dynamic max-price adjustment for an active play already in progress.
+-- Locks opp.quantity (never shrinks 3x -> 2x mid-shopping because earlier reagents spent wallet gold
+-- or depleted cheap AH supply), prices already-bought items at their actual spent copper, and
+-- dynamically adjusts each remaining unbought item's effectiveMaxUnitPrice from remaining headroom.
+function PF.OpportunityEngine.UpdateInProgressOpportunityPricing(opp)
+    if type(opp) ~= "table" or type(opp.shoppingList) ~= "table" or #opp.shoppingList == 0 then
+        return false
+    end
+
+    local hasProgress = (opp._hasActivePurchases == true)
+    if not hasProgress then
+        for _, item in ipairs(opp.shoppingList) do
+            if type(item) == "table" and (item.purchasedInMail or 0) > 0 then
+                hasProgress = true
+                opp._hasActivePurchases = true
+                break
+            end
+        end
+    end
+
+    if not hasProgress then
+        for _, item in ipairs(opp.shoppingList) do
+            if type(item) == "table" then
+                item.effectiveMaxUnitPrice = item.maxUnitPrice
+            end
+        end
+        return false
+    end
+
+    local settings = (Profitable_DB and Profitable_DB.settings) or {}
+    local minProfit = settings.minProfitCopper or 100
+    local totalNetRev = tonumber(opp.totalNetRevenue) or ((tonumber(opp.unitNetRevenue) or 0) * math.max(1, tonumber(opp.quantity) or 1))
+    local lockedSpent = type(opp._lockedSpentByItem) == "table" and opp._lockedSpentByItem or {}
+    local now = (_G.time and _G.time()) or 0
+
+    local itemCosts = {}
+    local acquiredCosts = {}
+    local totalProjectedCost = 0
+    local anyRemainingUnavailable = false
+
+    for idx, item in ipairs(opp.shoppingList) do
+        local effectiveNeeded = math.max(0, math.floor(tonumber(item.effectiveQuantity or item.totalQuantity) or 0))
+        local remToBuy = math.max(0, math.floor(tonumber(item.remainingToBuy) or 0))
+        local acquiredQty = math.max(0, effectiveNeeded - remToBuy)
+        local plannedUnit = tonumber(item.avgUnitPrice or item.maxUnitPrice) or 0
+
+        local acqCost = 0
+        if acquiredQty > 0 then
+            local rec = lockedSpent[item.itemId]
+            local inMailCount, inMailSpent = 0, 0
+            if PF.AHVerifier and PF.AHVerifier.GetPurchasedInMailInfo then
+                inMailCount, inMailSpent = PF.AHVerifier.GetPurchasedInMailInfo(item.itemId)
+            end
+            if rec and (rec.qty or 0) > 0 and (rec.spentCopper or 0) > 0 then
+                local paidQty = math.min(acquiredQty, rec.qty)
+                local paidPortion = math.floor((rec.spentCopper * (paidQty / rec.qty)) + 0.5)
+                local extraOwned = math.max(0, acquiredQty - paidQty)
+                acqCost = paidPortion + (extraOwned * plannedUnit)
+            elseif inMailCount > 0 and inMailSpent > 0 then
+                local paidQty = math.min(acquiredQty, inMailCount)
+                local paidPortion = math.floor((inMailSpent * (paidQty / inMailCount)) + 0.5)
+                local extraOwned = math.max(0, acquiredQty - paidQty)
+                acqCost = paidPortion + (extraOwned * plannedUnit)
+            else
+                acqCost = acquiredQty * plannedUnit
+            end
+        end
+        acquiredCosts[idx] = acqCost
+
+        local remCost = 0
+        if remToBuy > 0 then
+            if item.source == "Vendor" then
+                remCost = remToBuy * plannedUnit
+            else
+                local ob = Profitable_DB and Profitable_DB.orderBookCache and Profitable_DB.orderBookCache[item.itemId]
+                if ob and (now - (ob.timestamp or 0)) <= 600 then
+                    if ob.unavailable or type(ob.listings) ~= "table" or #ob.listings == 0 then
+                        item._liveUnavailable = true
+                        item._liveMinUnitPrice = nil
+                        anyRemainingUnavailable = true
+                        remCost = remToBuy * plannedUnit
+                    else
+                        item._liveUnavailable = false
+                        item._liveMinUnitPrice = ob.listings[1] and ob.listings[1].unitPrice or nil
+                        local left = remToBuy
+                        local walked = 0
+                        for _, tier in ipairs(ob.listings) do
+                            if left <= 0 then break end
+                            local up = tier.unitPrice or 0
+                            local q = tier.quantity or 0
+                            if up > 0 and q > 0 then
+                                local take = math.min(left, q)
+                                walked = walked + (take * up)
+                                left = left - take
+                            end
+                        end
+                        if left > 0 then
+                            local fallbackUnit = (ob.listings[#ob.listings] and ob.listings[#ob.listings].unitPrice) or plannedUnit
+                            walked = walked + (left * fallbackUnit)
+                        end
+                        remCost = walked
+                    end
+                else
+                    remCost = remToBuy * plannedUnit
+                end
+            end
+        else
+            item._liveUnavailable = false
+            item._liveMinUnitPrice = nil
+        end
+
+        itemCosts[idx] = acqCost + remCost
+        totalProjectedCost = totalProjectedCost + itemCosts[idx]
+    end
+
+    local anyRemainingExceedsCap = false
+    for idx, item in ipairs(opp.shoppingList) do
+        local plannedMax = tonumber(item.maxUnitPrice or item.avgUnitPrice) or 0
+        local remToBuy = math.max(0, math.floor(tonumber(item.remainingToBuy) or 0))
+        if item.source == "AH" and remToBuy > 0 and totalNetRev > 0 then
+            local otherItemsCost = totalProjectedCost - itemCosts[idx]
+            local headroom = totalNetRev - minProfit - otherItemsCost - acquiredCosts[idx]
+            local breakEvenUnit = (headroom > 0) and math.floor(headroom / remToBuy) or 0
+            local volatilityCap = math.max(math.floor(plannedMax * 2.0), plannedMax + 50)
+            local dynMax = math.max(0, math.min(breakEvenUnit, volatilityCap))
+            item.effectiveMaxUnitPrice = dynMax
+            if item._liveMinUnitPrice and dynMax > 0 and item._liveMinUnitPrice > dynMax then
+                anyRemainingExceedsCap = true
+            elseif dynMax <= 0 then
+                anyRemainingExceedsCap = true
+            end
+        else
+            item.effectiveMaxUnitPrice = plannedMax
+        end
+    end
+
+    if totalNetRev > 0 then
+        opp.totalCost = totalProjectedCost
+        opp.totalProfit = totalNetRev - totalProjectedCost
+        opp.roiPercent = (totalProjectedCost > 0) and math.floor(((opp.totalProfit / totalProjectedCost) * 100) + 0.5) or 0
+        opp._liveUnprofitable = anyRemainingUnavailable or anyRemainingExceedsCap or (opp.totalProfit < minProfit)
+    end
+
+    return true
 end
 
 local function ComputeEndResultKey(candidate)
