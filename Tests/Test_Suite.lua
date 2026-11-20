@@ -43,21 +43,22 @@ Assert(PF.Formatter.GetPlayerGold() == 220000, "Read player gold from GetMoney()
 Assert(PF.VendorDatabase.GetVendorBuyPrice(2320) == 10, "Coarse Thread vendor buy price is 10c")
 Assert(PF.VendorDatabase.GetVendorBuyPrice(2880) == 100, "Weak Flux vendor buy price is 1s (100c)")
 Assert(PF.VendorDatabase.GetVendorBuyPrice(3857) == 500, "Coal vendor buy price is 5s (500c)")
-Assert(PF.VendorDatabase.GetVendorSellPrice(2846) == 107, "Copper Chain Pants vendor sell price is 1s 7c (107c)")
+Assert(PF.VendorDatabase.GetVendorSellPrice(2852) == 67, "Copper Chain Pants vendor sell price is 67c")
 
 -- 3. Disenchant Database & 3:1 Essence Conversion Tests
-Assert(PF.DisenchantDatabase.CanDisenchant(5540) == true, "Iridescent Hammer (Green Weapon) is disenchantable")
+Assert(PF.DisenchantDatabase.CanDisenchant(5541) == true, "Iridescent Hammer (Green Weapon) is disenchantable")
 Assert(PF.DisenchantDatabase.CanDisenchant(2447) == false, "Peacebloom (Trade Good) is not disenchantable")
 Assert(PF.DisenchantDatabase.CanDisenchant(11288) == false, "Greater Magic Wand (Crafted Wand) is excluded from DE")
+Assert(PF.DisenchantDatabase.CanDisenchant(217287) == false, "Greater Mystic Wand (WoW: Forever Crafted Wand) is excluded from DE")
 
 -- Set enchanting mat prices in PCF_DB:
--- Iridescent Hammer (5540) is ilvl 26 Uncommon Weapon:
+-- Iridescent Hammer (5541) is ilvl 28 Uncommon Weapon:
 -- 75% Greater Astral Essence (11082, 1-2 avg 1.5), 20% Soul Dust (11083, 1-2 avg 1.5), 5% Large Glimmering Shard (11084, 1)
 _G.PCF_DB.prices[11082] = { minBuyout = 40000, count = 20, lastUpdated = Mock.currentTime } -- 4g ea
 _G.PCF_DB.prices[11083] = { minBuyout = 5000,  count = 50, lastUpdated = Mock.currentTime } -- 50s ea
 _G.PCF_DB.prices[11084] = { minBuyout = 80000, count = 10, lastUpdated = Mock.currentTime } -- 8g ea
 
-local deHammer = PF.DisenchantDatabase.EvaluateDisenchant(5540, nil, PF.OpportunityEngine.ResolveAHPrice, 0.05)
+local deHammer = PF.DisenchantDatabase.EvaluateDisenchant(5541, nil, PF.OpportunityEngine.ResolveAHPrice, 0.05)
 -- Expected gross: 0.75 * 1.5 * 40000 (45000) + 0.20 * 1.5 * 5000 (1500) + 0.05 * 1 * 80000 (4000) = 50500 (5g 05s)
 -- Expected net (after 5% cut): 50500 * 0.95 = 47975
 Assert(deHammer ~= nil and deHammer.grossValue == 50500 and deHammer.netValue == 47975, "Compute exact expected DE value for Iridescent Hammer")
@@ -74,7 +75,7 @@ Mock.tradeSkillLine = "Blacksmithing"
 Mock.tradeSkills = {
     {
         name = "Copper Chain Pants",
-        outputItemId = 2846,
+        outputItemId = 2852,
         minMade = 1,
         maxMade = 1,
         reagents = {
@@ -92,7 +93,7 @@ Mock.tradeSkills = {
     },
     {
         name = "Iridescent Hammer",
-        outputItemId = 5540,
+        outputItemId = 5541,
         minMade = 1,
         maxMade = 1,
         reagents = {
@@ -154,9 +155,9 @@ Profitable_DB.settings.minProfitCopper = 100
 Profitable_DB.itemCache[2447] = { name = "Peacebloom", quality = 1, itemLevel = 1, classID = 7, vendorSell = 13500 }
 _G.PCF_DB.prices[2447] = { minBuyout = 11000, count = 20, lastUpdated = Mock.currentTime } -- Cost 22g (20*1g10s), Vendor 27g (20*1g35s) -> Profit 5g!
 
--- 2) Craft and Vendor [Copper Chain Pants] (2846)
+-- 2) Craft and Vendor [Copper Chain Pants] (2852)
 -- Give Copper Chain Pants vendorSell = 12500 (1g 25s), Copper Bar (2840) = 2750 (27s 50c) x 4 = 1g 10s per craft -> 20 crafts = Cost 22g, Profit 3g!
-Profitable_DB.itemCache[2846] = { name = "Copper Chain Pants", quality = 1, itemLevel = 9, classID = 4, invType = "INVTYPE_LEGS", vendorSell = 12500 }
+Profitable_DB.itemCache[2852] = { name = "Copper Chain Pants", quality = 2, itemLevel = 10, classID = 4, invType = "INVTYPE_LEGS", vendorSell = 12500 }
 _G.PCF_DB.prices[2840] = { minBuyout = 2750, count = 80, lastUpdated = Mock.currentTime }
 
 -- 3) Craft and AH [Solid Grinding Stone] (7966)
@@ -165,7 +166,7 @@ _G.PCF_DB.prices[2840] = { minBuyout = 2750, count = 80, lastUpdated = Mock.curr
 _G.PCF_DB.prices[7912] = { minBuyout = 2750, count = 80, lastUpdated = Mock.currentTime }
 _G.PCF_DB.prices[7966] = { minBuyout = 12868, count = 20, lastUpdated = Mock.currentTime }
 
--- 4) Craft and DE [Iridescent Hammer] (5540)
+-- 4) Craft and DE [Iridescent Hammer] (5541)
 -- Net DE value is 47,975c (~4g 80s). Make 5 crafts cost 20g (40,000c per craft):
 -- 10x Bronze Bar (2841) @ 3500c (35s) = 35,000c + 1x Iridescent Pearl (5500) @ 4800c + 2x Weak Flux (vendor 100c) = 200c -> 40,000c (4g) per craft!
 -- 5 crafts = Cost 20g (200,000c), Net DE Rev = 239,875c -> Profit ~3g 98s!
@@ -253,18 +254,18 @@ Assert(PF.GetEffectiveAHCutRate() == 0.05, "Restore 5% AH cut at Faction Auction
 -- Verify slow-moving gear Craft and AH deducts expected 15% vendor deposit risk and caps units at maxAHGearUnits (3)
 local gearCand = {
     actionType = "CRAFT_AH",
-    itemId = 5540, -- Iridescent Hammer (Weapon, vendorSell = 3194)
+    itemId = 5541, -- Iridescent Hammer (Weapon, vendorSell = 3693)
     itemName = "Iridescent Hammer",
     ahCutRate = 0.05,
     unitGrossRevenue = 60000,
     unitAHCut = 3000,
-    unitDepositRisk = math.floor(3194 * 0.15),
-    unitNetRevenue = 60000 - 3000 - math.floor(3194 * 0.15),
+    unitDepositRisk = math.floor(3693 * 0.15),
+    unitNetRevenue = 60000 - 3000 - math.floor(3693 * 0.15),
     maxUnits = Profitable_DB.settings.maxAHGearUnits,
     rawReagents = { { itemId = 2841, name = "Bronze Bar", count = 10 } },
 }
 local gearOpp = PF.OpportunityEngine.CalculateSteppedOpportunity(gearCand, 220000)
-Assert(gearOpp ~= nil and gearOpp.quantity == 3 and gearOpp.totalDepositRisk == (3 * math.floor(3194 * 0.15)), "Cap slow-moving AH gear crafts at 3 units and deduct expected AH deposit risk")
+Assert(gearOpp ~= nil and gearOpp.quantity == 3 and gearOpp.totalDepositRisk == (3 * math.floor(3693 * 0.15)), "Cap slow-moving AH gear crafts at 3 units and deduct expected AH deposit risk")
 
 -- 10. Test Baseline Skill-Matched Recipes & Trainer Recommendations
 Mock.skillLines = {
@@ -912,7 +913,7 @@ do
         { id = "VENDOR:2840", itemId = 2840, itemName = "Copper Bar", itemLink = "[Copper Bar]", actionLabel = "Vendor", quantity = 5, totalCost = 100, totalProfit = 150, roiPercent = 150 },
     }
     _G.Profitable_DB.lastHonorableMentions = {
-        { id = "CRAFT_VENDOR:2846", itemId = 2846, itemName = "Copper Chain Pants", itemLink = "[Copper Chain Pants]", actionLabel = "Craft and Vendor", hmCategory = "Top Vendor", quantity = 1, totalCost = 50, totalProfit = 50, roiPercent = 100 },
+        { id = "CRAFT_VENDOR:2852", itemId = 2852, itemName = "Copper Chain Pants", itemLink = "[Copper Chain Pants]", actionLabel = "Craft and Vendor", hmCategory = "Top Vendor", quantity = 1, totalCost = 50, totalProfit = 50, roiPercent = 100 },
     }
 
     _G.AuctionHouseFrame:Show()
@@ -1054,13 +1055,13 @@ do
     -- 1) BUY_DE: Item 95002 (Rare sword @ 1g -> Large Glimmering Shard 11084 @ 8g)
     _G.Profitable_DB.itemCache[95002] = { name = "Buyout Rare Sword", quality = 3, itemLevel = 28, classID = 2, invType = "INVTYPE_WEAPON", vendorSell = 5000 }
     _G.PCF_DB.prices[95002] = { minBuyout = 10000, count = 5, lastUpdated = nowTs, source = "Scan" }
-    -- 2) CRAFT_VENDOR: Copper Chain Pants (2846, vendorSell 1g 25s, crafted from 4x Copper Bar 2840 @ 20s = 80s)
-    _G.Profitable_DB.itemCache[2846] = { name = "Copper Chain Pants", quality = 1, itemLevel = 9, classID = 4, invType = "INVTYPE_LEGS", vendorSell = 12500 }
+    -- 2) CRAFT_VENDOR: Copper Chain Pants (2852, vendorSell 1g 25s, crafted from 4x Copper Bar 2840 @ 20s = 80s)
+    _G.Profitable_DB.itemCache[2852] = { name = "Copper Chain Pants", quality = 2, itemLevel = 10, classID = 4, invType = "INVTYPE_LEGS", vendorSell = 12500 }
     _G.PCF_DB.prices[2840] = { minBuyout = 2000, count = 80, lastUpdated = nowTs, source = "Scan" }
     _G.PF.RecipeScanner.RegisterRecipe({
         name = "Copper Chain Pants",
         profession = "Blacksmithing",
-        outputItemId = 2846,
+        outputItemId = 2852,
         minMade = 1,
         maxMade = 1,
         avgMade = 1,
@@ -1133,7 +1134,7 @@ do
     local origMarketFeed = _G.Profitable_MarketFeed
     local origGetNumTradeSkills = _G.GetNumTradeSkills
 
-    -- 21A. Config v1 -> v3 migration resets old default marketFeedVerifySkipSeconds = 7200 to 0
+    -- 21A. Config v1 -> v4 migration resets old default marketFeedVerifySkipSeconds = 7200 to 0
     local legacyV1DB = {
         version = 1,
         settings = {
@@ -1141,7 +1142,7 @@ do
         },
     }
     _G.PF.LoadConfig(legacyV1DB)
-    Assert(legacyV1DB.version == 3 and legacyV1DB.settings.marketFeedVerifySkipSeconds == 0, "v1 -> v3 migration resets legacy marketFeedVerifySkipSeconds (7200 -> 0)")
+    Assert(legacyV1DB.version == 4 and legacyV1DB.settings.marketFeedVerifySkipSeconds == 0, "v1 -> v4 migration resets legacy marketFeedVerifySkipSeconds (7200 -> 0)")
 
     -- 21B. Modern C_TradeSkillUI per-recipe profession resolution (immune to window-switch race conditions)
     _G.GetNumTradeSkills = function() return 0 end -- Force modern C_TradeSkillUI path
@@ -1610,7 +1611,7 @@ do
         activePlay = { id = "VENDOR:253664", itemId = 253664 },
     }
     _G.PF.LoadConfig(legacyV2DB)
-    Assert(legacyV2DB.version == 3, "v2 -> v3 migration upgrades config version to 3")
+    Assert(legacyV2DB.version == 4, "v2 -> v4 migration upgrades config version to 4")
     Assert(next(legacyV2DB.orderBookCache) == nil, "v2 -> v3 migration flushes poisoned orderBookCache")
     Assert(_G.PCF_DB.prices[253664] == nil and legacyV2DB.embeddedPCF.prices[253664] == nil, "v2 -> v3 migration purges tainted PCF Sniff / Profitable Live entries")
     Assert(_G.PCF_DB.prices[2589] and _G.PCF_DB.prices[2589].minBuyout == 15, "v2 -> v3 migration preserves intact PCF Full Scan prices")
@@ -2779,6 +2780,253 @@ do
     _G.PCF_DB.prices = origPrices
     _G.Profitable_DB.orderBookCache = origOrderBooks
     _G.Profitable_DB.itemCache[2447] = origItemCache2447
+end
+
+-- 31. Regression Tests: RecipeDatabase Item ID & Reagent Accuracy, Baseline Integrity Guard,
+--     Modern Scanner Required-Reagent Validation & Stale Baseline Play Invalidation
+do
+    local origDB31 = _G.Profitable_DB
+    local origPrices31 = _G.PCF_DB.prices
+    local origSkillLines31 = Mock.skillLines
+    local origTradeSkills31 = Mock.tradeSkills
+    local origGetNumTradeSkills31 = _G.GetNumTradeSkills
+    local origCTSU31 = _G.C_TradeSkillUI
+    local origEnum31 = _G.Enum
+    local origTimers31 = Mock.timers
+
+    -- 31A. Audit every single baseline recipe: unique outputItemId, valid reagents, and seed metadata name match
+    local baseline = _G.PF.RecipeDatabase.GetAllBaselineRecipes()
+    local byOutput = {}
+    local seenIds = {}
+    local savedItemCache = _G.Profitable_DB.itemCache
+    _G.Profitable_DB.itemCache = {} -- Force seed metadata check cleanly without earlier test mocks
+    for _, rec in ipairs(baseline) do
+        Assert(type(rec.outputItemId) == "number" and rec.outputItemId > 0, "Baseline recipe has valid outputItemId: " .. tostring(rec.name))
+        Assert(not seenIds[rec.outputItemId], "Baseline recipe outputItemId is unique: " .. tostring(rec.outputItemId))
+        seenIds[rec.outputItemId] = true
+        byOutput[rec.outputItemId] = rec
+        Assert(type(rec.reagents) == "table" and #rec.reagents > 0, "Baseline recipe has non-empty reagents: " .. tostring(rec.name))
+        for _, rg in ipairs(rec.reagents) do
+            Assert(type(rg.itemId) == "number" and rg.itemId > 0 and type(rg.count) == "number" and rg.count > 0,
+                "Baseline reagent has valid itemId/count for " .. tostring(rec.name))
+        end
+        local meta = _G.PF.VendorDatabase.GetItemMetadata(rec.outputItemId, nil, true)
+        local expectedName = rec.outputName or rec.name
+        Assert(meta ~= nil and meta.name == expectedName,
+            string.format("Baseline [%d] name matches VendorDatabase seed ('%s' == '%s')", rec.outputItemId, tostring(meta and meta.name), tostring(expectedName)))
+    end
+    _G.Profitable_DB.itemCache = savedItemCache
+
+    local function ReagentCount(rec, itemId)
+        for _, rg in ipairs((rec and rec.reagents) or {}) do
+            if rg.itemId == itemId then return rg.count end
+        end
+        return 0
+    end
+
+    -- Verify Turtle Scale Helm (8191), Turtle Scale Breastplate (8189), Nightscape Tunic (8175), Nightscape Headband (8176)
+    Assert(byOutput[8191] and byOutput[8191].name == "Turtle Scale Helm"
+        and ReagentCount(byOutput[8191], 4304) == 14
+        and ReagentCount(byOutput[8191], 8167) == 24
+        and ReagentCount(byOutput[8191], 8343) == 1,
+        "Turtle Scale Helm (8191) requires 14x Thick Leather, 24x Turtle Scale, 1x Heavy Silken Thread")
+    Assert(byOutput[8189] and byOutput[8189].name == "Turtle Scale Breastplate"
+        and ReagentCount(byOutput[8189], 4304) == 6
+        and ReagentCount(byOutput[8189], 8167) == 12
+        and ReagentCount(byOutput[8189], 8343) == 1,
+        "Turtle Scale Breastplate (8189) requires 6x Thick Leather, 12x Turtle Scale, 1x Heavy Silken Thread")
+    Assert(byOutput[8175] and byOutput[8175].name == "Nightscape Tunic"
+        and ReagentCount(byOutput[8175], 4304) == 7
+        and ReagentCount(byOutput[8175], 4291) == 2,
+        "Nightscape Tunic uses correct itemId 8175 (never Turtle Scale Breastplate 8189)")
+    Assert(byOutput[8176] and byOutput[8176].name == "Nightscape Headband"
+        and ReagentCount(byOutput[8176], 4304) == 5
+        and ReagentCount(byOutput[8176], 4291) == 2,
+        "Nightscape Headband uses correct itemId 8176 (never Turtle Scale Helm 8191)")
+
+    -- Verify other previously broken baseline recipes
+    Assert(byOutput[4255] and ReagentCount(byOutput[4255], 4234) == 9 and ReagentCount(byOutput[4255], 2319) == 0,
+        "Green Leather Armor (4255) requires 9x Heavy Leather (not Medium Leather)")
+    Assert(byOutput[4252] and ReagentCount(byOutput[4252], 3390) == 1,
+        "Dark Leather Shoulders (4252) includes 1x Elixir of Lesser Agility")
+    Assert(byOutput[7387] and ReagentCount(byOutput[7387], 7071) == 1 and ReagentCount(byOutput[7387], 3575) == 0,
+        "Dusky Belt (7387) requires 1x Iron Buckle (not Iron Bar)")
+    Assert(byOutput[7059] and byOutput[7059].name == "Crimson Silk Shoulders" and ReagentCount(byOutput[7059], 6371) == 2,
+        "Crimson Silk Shoulders uses 7059 and includes 2x Fire Oil")
+    Assert(byOutput[13864] and ReagentCount(byOutput[13864], 14227) == 2 and ReagentCount(byOutput[13864], 8170) == 4 and ReagentCount(byOutput[13864], 3575) == 0,
+        "Runecloth Boots (13864) requires Ironweb Spider Silk + Rugged Leather (not Iron Bar / Thick Leather)")
+    Assert(byOutput[13866] and ReagentCount(byOutput[13866], 14227) == 2 and ReagentCount(byOutput[13866], 3575) == 0,
+        "Runecloth Headband (13866) requires 2x Ironweb Spider Silk (not Iron Bar)")
+    Assert(byOutput[5541] and byOutput[5541].name == "Iridescent Hammer"
+        and ReagentCount(byOutput[5541], 3466) == 1 and ReagentCount(byOutput[5541], 3478) == 2 and ReagentCount(byOutput[5541], 2319) == 2,
+        "Iridescent Hammer uses 5541 and includes Strong Flux, Coarse Grinding Stone, and Medium Leather")
+    Assert(byOutput[7918] and byOutput[7918].name == "Heavy Mithril Shoulder"
+        and byOutput[7919] and byOutput[7919].name == "Heavy Mithril Gauntlet" and ReagentCount(byOutput[7919], 4338) == 4
+        and byOutput[7921] and byOutput[7921].name == "Heavy Mithril Pants" and ReagentCount(byOutput[7921], 3466) == 0,
+        "Heavy Mithril Shoulder (7918), Gauntlet (7919 with Mageweave Cloth), and Pants (7921) use exact IDs and reagents")
+    Assert(byOutput[4324] and ReagentCount(byOutput[4324], 6260) == 4 and ReagentCount(byOutput[4324], 2321) == 0,
+        "Azure Silk Vest (4324) requires 5x Bolt of Silk Cloth and 4x Blue Dye")
+    Assert(byOutput[11288] and ReagentCount(byOutput[11288], 10938) == 2,
+        "Greater Magic Wand (11288) matches WoW: Forever 2x Lesser Magic Essence")
+    Assert(byOutput[217287] and byOutput[217287].name == "Greater Mystic Wand" and ReagentCount(byOutput[217287], 11134) == 1 and ReagentCount(byOutput[217287], 11137) == 1,
+        "Greater Mystic Wand uses WoW: Forever itemId 217287 with Star Wood, Lesser Mystic Essence, Vision Dust")
+
+    -- 31B. Pricing Turtle Scale Helm (8191) accounts for all 24x Turtle Scale (never fake 352% ROI)
+    local now31 = math.floor(Mock.currentTime)
+    _G.Profitable_DB = _G.PF.LoadConfig({})
+    _G.Profitable_DB.settings.assumeCanDisenchant = false
+    _G.Profitable_DB.settings.showVendorPlays = false
+    _G.Profitable_DB.settings.showCraftPlays = true
+    _G.PCF_DB.lastFullScan = now31
+    _G.PCF_DB.prices = {
+        [4304] = { minBuyout = 525,   count = 100, lastUpdated = now31, source = "Scan" }, -- Thick Leather 5s 25c
+        [8167] = { minBuyout = 3828,  count = 100, lastUpdated = now31, source = "Scan" }, -- Turtle Scale 38s 28c (24x = 91s 87c!)
+        [8343] = { minBuyout = 2000,  count = 50,  lastUpdated = now31, source = "Scan" }, -- Heavy Silken Thread 20s
+        [8191] = { minBuyout = 18098, count = 5,   lastUpdated = now31, source = "Scan" }, -- Turtle Scale Helm 1g 80s 98c
+    }
+    -- Cost per craft: 14*525 (7350) + 24*3828 (91872) + 1*2000 (2000) = 101222c (~10g? wait: 38s 28c = 3828 -> 24x = 9g 18s 72c, far above 1g 80s 98c -> unprofitable!)
+    -- Also verify exact cost when Turtle Scale is 3s 83c (383c): 14*525 (7350) + 24*383 (9192) + 2000 = 18542c (1g 85s 42c) > 1g 80s 98c AH -> unprofitable, just like screenshot!
+    _G.PCF_DB.prices[8167].minBuyout = 383
+    Mock.tradeSkills = {}
+    Mock.skillLines = { { name = "Leatherworking", isHeader = false, rank = 250, maxRank = 300 } }
+    local lwPlays = _G.PF.OpportunityEngine.FindTopOpportunities(500000)
+    local foundTurtleHelm = false
+    for _, opp in ipairs(lwPlays) do
+        if opp.itemId == 8191 then foundTurtleHelm = true end
+    end
+    Assert(foundTurtleHelm == false, "Turtle Scale Helm (8191) is NOT falsely recommended when 24x Turtle Scale pushes craft cost (1g 85s 42c) above AH value (1g 80s 98c)")
+
+    -- Lower Turtle Scale to 1s (100c) -> cost = 14*525 (7350) + 24*100 (2400) + 2000 = 11750c (1g 17s 50c) -> profitable and shopping list MUST include 24x Turtle Scale per craft!
+    _G.PCF_DB.prices[8167].minBuyout = 100
+    local lwPlaysProfitable = _G.PF.OpportunityEngine.FindTopOpportunities(500000)
+    local turtleOpp = nil
+    for _, opp in ipairs(lwPlaysProfitable) do
+        if opp.itemId == 8191 then turtleOpp = opp end
+    end
+    Assert(turtleOpp ~= nil and turtleOpp.quantity == 3, "Turtle Scale Helm becomes profitable when Turtle Scale drops to 1s")
+    local hasTurtleScalesInList = false
+    for _, shop in ipairs((turtleOpp and turtleOpp.shoppingList) or {}) do
+        if shop.itemId == 8167 and shop.countPerUnit == 24 and shop.totalQuantity == 72 then
+            hasTurtleScalesInList = true
+        end
+    end
+    Assert(hasTurtleScalesInList == true, "Turtle Scale Helm shopping list includes all 24x Turtle Scale per craft (72x for 3x)")
+
+    -- 31C. Baseline Output-Item Name Integrity Guard rejects mismatched live itemCache names
+    _G.Profitable_DB.itemCache[8191] = { name = "Completely Different Item", quality = 2, itemLevel = 46, classID = 4, invType = "INVTYPE_HEAD", vendorSell = 7780 }
+    local knownWithMismatch = _G.PF.RecipeScanner.GetKnownRecipes()
+    local emittedMismatched8191 = false
+    for _, rec in ipairs(knownWithMismatch) do
+        if rec.outputItemId == 8191 then emittedMismatched8191 = true end
+    end
+    Assert(emittedMismatched8191 == false, "Baseline integrity guard rejects baseline recipe when live itemCache name mismatches expected output item")
+    _G.Profitable_DB.itemCache[8191] = nil
+
+    -- 31D. Modern ScanModernTradeSkillUI: skips optional slots, rejects incomplete required slots, merges duplicate reagents, and invalidates stale baseline plays
+    _G.GetNumTradeSkills = function() return 0 end
+    _G.Enum = { CraftingReagentType = { Modifying = 0, Basic = 1, Finishing = 2, Automatic = 3 } }
+    local tradeSkillReady31 = false
+    _G.C_TradeSkillUI = {
+        IsTradeSkillReady = function() return tradeSkillReady31 end,
+        GetBaseProfessionInfo = function() return { parentProfessionID = 165, parentProfessionName = "Leatherworking" } end,
+        GetProfessionInfoByRecipeID = function() return { parentProfessionID = 165, parentProfessionName = "Leatherworking" } end,
+        GetAllRecipeIDs = function() return { 10630, 999001 } end,
+        GetRecipeInfo = function(id)
+            if id == 10630 then return { recipeID = 10630, name = "Turtle Scale Helm", learned = true, itemID = 8191 } end
+            if id == 999001 then return { recipeID = 999001, name = "Broken Missing Reagent Helm", learned = true, itemID = 999002 } end
+            return nil
+        end,
+        GetRecipeSchematic = function(id)
+            if id == 10630 then
+                return {
+                    outputItemID = 8191,
+                    quantityMin = 1,
+                    quantityMax = 1,
+                    reagentSlotSchematics = {
+                        { required = true,  reagentType = 1, quantityRequired = 10, reagents = { { itemID = 4304 } } }, -- Thick Leather part 1
+                        { required = true,  reagentType = 1, quantityRequired = 4,  reagents = { { itemID = 4304 } } }, -- Thick Leather part 2 (merged -> 14)
+                        { required = true,  reagentType = 1, quantityRequired = 24, reagents = { { itemID = 8167 } } }, -- Turtle Scale
+                        { required = true,  reagentType = 1, quantityRequired = 1,  reagents = { { itemID = 8343 } } }, -- Heavy Silken Thread
+                        { required = false, reagentType = 2, quantityRequired = 1,  reagents = { { itemID = 2325 } } }, -- Optional finishing slot -> MUST be ignored
+                    },
+                }
+            elseif id == 999001 then
+                return {
+                    outputItemID = 999002,
+                    quantityMin = 1,
+                    quantityMax = 1,
+                    reagentSlotSchematics = {
+                        { required = true, reagentType = 1, quantityRequired = 5, reagents = { { itemID = 4304 } } },
+                        { required = true, reagentType = 1, quantityRequired = 24, reagents = {} }, -- Unresolved required reagent -> MUST reject whole recipe!
+                    },
+                }
+            end
+            return nil
+        end,
+    }
+
+    -- Seed a stale baseline play for 8191 with wrong reagents (old 5x Thick Leather, 2x Silken Thread)
+    local staleTurtleOpp = {
+        id = "CRAFT_AH:8191",
+        itemId = 8191,
+        recipe = {
+            name = "Nightscape Headband",
+            outputItemId = 8191,
+            isTrainerRecommendation = true,
+            reagents = { { itemId = 4304, count = 5 }, { itemId = 4291, count = 2 } },
+        },
+    }
+    _G.Profitable_DB.lastTopPlays = { staleTurtleOpp }
+    _G.Profitable_DB.activePlay = staleTurtleOpp
+
+    -- Fire TRADE_SKILL_SHOW while IsTradeSkillReady() == false -> schedules deferred retry timer
+    Mock.timers = {}
+    _G.PF.RecipeScanner.frame:Trigger("TRADE_SKILL_SHOW")
+    Assert(#Mock.timers == 1, "TRADE_SKILL_SHOW schedules deferred scan retry when C_TradeSkillUI is not ready yet")
+
+    -- Profession finishes loading before timer fires -> retry scans Turtle Scale Helm and rejects broken recipe
+    tradeSkillReady31 = true
+    Mock.FlushTimers(10)
+    local charTbl31 = _G.Profitable_DB.charRecipes[_G.PF.GetCharacterKey()]
+    local scannedTurtle = charTbl31 and charTbl31["10630:Turtle Scale Helm"]
+    local scannedBroken = charTbl31 and charTbl31["999001:Broken Missing Reagent Helm"]
+    Assert(scannedTurtle ~= nil, "Deferred retry successfully scans Turtle Scale Helm once C_TradeSkillUI becomes ready")
+    Assert(scannedBroken == nil, "ScanModernTradeSkillUI refuses to save incomplete recipe with unresolved required reagent")
+    Assert(#scannedTurtle.reagents == 3
+        and ReagentCount(scannedTurtle, 4304) == 14
+        and ReagentCount(scannedTurtle, 8167) == 24
+        and ReagentCount(scannedTurtle, 8343) == 1
+        and ReagentCount(scannedTurtle, 2325) == 0,
+        "ScanModernTradeSkillUI merges duplicate reagents (14x Thick Leather), captures 24x Turtle Scale + 1x Heavy Silken Thread, and skips optional finishing slot")
+    Assert(#_G.Profitable_DB.lastTopPlays == 0 and _G.Profitable_DB.activePlay == nil,
+        "Scanning real Turtle Scale Helm invalidates stale baseline play with mismatched reagents")
+
+    -- 31E. Config v3 -> v4 migration flushes cached plays while preserving charRecipes and settings
+    local legacyV3DB = {
+        version = 3,
+        settings = { customBudgetCopper = 50000 },
+        charRecipes = { ["Tester-Forever"] = { ["10630:Turtle Scale Helm"] = scannedTurtle } },
+        lastTopPlays = { staleTurtleOpp },
+        lastHonorableMentions = { staleTurtleOpp },
+        activePlay = staleTurtleOpp,
+    }
+    _G.PF.LoadConfig(legacyV3DB)
+    Assert(legacyV3DB.version == 4, "v3 -> v4 migration upgrades config version to 4")
+    Assert(#legacyV3DB.lastTopPlays == 0 and #legacyV3DB.lastHonorableMentions == 0 and legacyV3DB.activePlay == nil,
+        "v3 -> v4 migration flushes stale cached plays")
+    Assert(legacyV3DB.settings.customBudgetCopper == 50000 and legacyV3DB.charRecipes["Tester-Forever"]["10630:Turtle Scale Helm"] ~= nil,
+        "v3 -> v4 migration preserves user settings and scanned charRecipes")
+
+    -- Restore globals
+    Mock.timers = origTimers31
+    _G.Enum = origEnum31
+    _G.C_TradeSkillUI = origCTSU31
+    _G.GetNumTradeSkills = origGetNumTradeSkills31
+    Mock.tradeSkills = origTradeSkills31
+    Mock.skillLines = origSkillLines31
+    _G.PCF_DB.prices = origPrices31
+    _G.Profitable_DB = origDB31
+    _G.PF.LoadConfig(origDB31)
 end
 
 print("\nAll Profitable test assertions passed successfully!")

@@ -6,10 +6,11 @@ PF.DisenchantDatabase = {}
 
 -- Crafted enchanting wands & special items that cannot be disenchanted in Classic / Forever
 local NON_DISENCHANTABLE_ITEMS = {
-    [11287] = true, -- Lesser Magic Wand (cannot be DE'd; great Craft & Vendor play instead)
-    [11288] = true, -- Greater Magic Wand
-    [11289] = true, -- Lesser Mystic Wand
-    [11290] = true, -- Greater Mystic Wand
+    [11287]  = true, -- Lesser Magic Wand (cannot be DE'd; great Craft & Vendor play instead)
+    [11288]  = true, -- Greater Magic Wand
+    [11289]  = true, -- Lesser Mystic Wand
+    [11290]  = true, -- Greater Mystic Wand (Classic)
+    [217287] = true, -- Greater Mystic Wand (WoW: Forever)
 }
 
 local NON_DISENCHANTABLE_INVTYPES = {

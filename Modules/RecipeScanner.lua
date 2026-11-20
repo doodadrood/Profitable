@@ -47,6 +47,100 @@ local INVALID_CRAFTING_PROFESSIONS = {
 }
 
 local pendingOpenRecipe = nil
+local pendingScanRetry = false
+
+local function NormalizeItemName(name)
+    if type(name) ~= "string" then return nil end
+    local trimmed = name:match("^%s*(.-)%s*$")
+    if not trimmed or trimmed == "" then return nil end
+    return trimmed:lower()
+end
+
+local function IsBaselineOutputNameValid(base)
+    if type(base) ~= "table" or not base.outputItemId or base.outputItemId <= 0 then
+        return false
+    end
+    local locale = (_G.GetLocale and _G.GetLocale()) or "enUS"
+    if locale ~= "enUS" and locale ~= "enGB" then
+        return true
+    end
+    local expected = NormalizeItemName(base.outputName or base.name)
+    if not expected then
+        return true
+    end
+    if PF.VendorDatabase and PF.VendorDatabase.GetLiveOrCachedItemMetadata then
+        local liveMeta = PF.VendorDatabase.GetLiveOrCachedItemMetadata(base.outputItemId, nil, true)
+        local liveName = liveMeta and NormalizeItemName(liveMeta.name) or nil
+        if liveName and liveName ~= expected then
+            return false
+        end
+    end
+    return true
+end
+
+local function ReagentsMatch(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then
+        return false
+    end
+    local countsA = {}
+    local uniqueA = 0
+    for _, r in ipairs(a) do
+        if not r or not r.itemId then return false end
+        if not countsA[r.itemId] then uniqueA = uniqueA + 1 end
+        countsA[r.itemId] = (countsA[r.itemId] or 0) + (r.count or r.countPerUnit or 1)
+    end
+    local countsB = {}
+    local uniqueB = 0
+    for _, r in ipairs(b) do
+        if not r or not r.itemId then return false end
+        if not countsB[r.itemId] then uniqueB = uniqueB + 1 end
+        countsB[r.itemId] = (countsB[r.itemId] or 0) + (r.count or r.countPerUnit or 1)
+    end
+    if uniqueA ~= uniqueB then
+        return false
+    end
+    for id, cnt in pairs(countsA) do
+        if countsB[id] ~= cnt then return false end
+    end
+    return true
+end
+
+local function InvalidateStaleBaselinePlaysForScannedRecipe(recipe)
+    if type(Profitable_DB) ~= "table" or type(recipe) ~= "table" or not recipe.outputItemId then
+        return
+    end
+    local function IsStaleBaselineOpp(opp)
+        return type(opp) == "table"
+            and type(opp.recipe) == "table"
+            and opp.recipe.isTrainerRecommendation == true
+            and (opp.itemId == recipe.outputItemId or opp.recipe.outputItemId == recipe.outputItemId)
+            and not ReagentsMatch(opp.recipe.reagents, recipe.reagents)
+    end
+    local function FilterList(list)
+        if type(list) ~= "table" then return nil end
+        local kept = {}
+        local removed = false
+        for _, opp in ipairs(list) do
+            if IsStaleBaselineOpp(opp) then
+                removed = true
+            else
+                table.insert(kept, opp)
+            end
+        end
+        return removed and kept or nil
+    end
+    local filteredTop = FilterList(Profitable_DB.lastTopPlays)
+    if filteredTop then
+        Profitable_DB.lastTopPlays = filteredTop
+    end
+    local filteredHM = FilterList(Profitable_DB.lastHonorableMentions)
+    if filteredHM then
+        Profitable_DB.lastHonorableMentions = filteredHM
+    end
+    if IsStaleBaselineOpp(Profitable_DB.activePlay) then
+        Profitable_DB.activePlay = nil
+    end
+end
 
 local function CleanProfessionName(rawName, skillLineId)
     if type(skillLineId) == "number" and skillLineId > 0 then
@@ -119,7 +213,10 @@ local function FindBaselineProfessionByOutput(outputItemId)
     if not outputItemId or outputItemId <= 0 then return nil, nil end
     if PF.RecipeDatabase and PF.RecipeDatabase.GetAllBaselineRecipes then
         for _, base in ipairs(PF.RecipeDatabase.GetAllBaselineRecipes()) do
-            if base.outputItemId == outputItemId and type(base.profession) == "string" and not INVALID_CRAFTING_PROFESSIONS[base.profession] then
+            if base.outputItemId == outputItemId
+                and IsBaselineOutputNameValid(base)
+                and type(base.profession) == "string"
+                and not INVALID_CRAFTING_PROFESSIONS[base.profession] then
                 return base.profession, PROFESSION_TO_SKILL_LINE_ID[base.profession]
             end
         end
@@ -541,6 +638,9 @@ local function SaveRecipe(charRecipes, recipe)
     recipe.key = key
     recipe.lastScanned = time()
     charRecipes[key] = recipe
+    if not recipe.isTrainerRecommendation then
+        InvalidateStaleBaselinePlaysForScannedRecipe(recipe)
+    end
     return true
 end
 
@@ -819,19 +919,49 @@ function PF.RecipeScanner.ScanModernTradeSkillUI()
                     local minMade = schematic.quantityMin or 1
                     local maxMade = schematic.quantityMax or minMade
                     local reagents = {}
+                    local reagentById = {}
+                    local requiredSlots = 0
+                    local allReagentsResolved = true
+                    local basicReagentType = _G.Enum and _G.Enum.CraftingReagentType and _G.Enum.CraftingReagentType.Basic
+
                     for _, slot in ipairs(schematic.reagentSlotSchematics) do
-                        local rItemId = slot.reagents and slot.reagents[1] and slot.reagents[1].itemID
-                        local rCount = slot.quantityRequired or 1
-                        if rItemId and rItemId > 0 and rCount > 0 then
-                            local meta = PF.VendorDatabase.GetItemMetadata(rItemId)
-                            table.insert(reagents, {
-                                itemId = rItemId,
-                                name = (meta and meta.name) or string.format("Item #%d", rItemId),
-                                count = rCount,
-                            })
+                        local isOptional = (slot.required == false)
+                        if not isOptional and basicReagentType ~= nil and slot.reagentType ~= nil
+                            and slot.reagentType ~= basicReagentType and slot.required ~= true then
+                            isOptional = true
+                        end
+                        if not isOptional then
+                            requiredSlots = requiredSlots + 1
+                            local rItemId = nil
+                            if type(slot.reagents) == "table" then
+                                for _, reagentOpt in ipairs(slot.reagents) do
+                                    if type(reagentOpt) == "table" and type(reagentOpt.itemID) == "number" and reagentOpt.itemID > 0 then
+                                        rItemId = reagentOpt.itemID
+                                        break
+                                    end
+                                end
+                            end
+                            local rCount = (type(slot.quantityRequired) == "number") and slot.quantityRequired or 1
+                            if rItemId and rItemId > 0 and rCount > 0 then
+                                local existingEntry = reagentById[rItemId]
+                                if existingEntry then
+                                    existingEntry.count = existingEntry.count + rCount
+                                else
+                                    local meta = PF.VendorDatabase.GetItemMetadata(rItemId)
+                                    local entry = {
+                                        itemId = rItemId,
+                                        name = (meta and meta.name) or string.format("Item #%d", rItemId),
+                                        count = rCount,
+                                    }
+                                    reagentById[rItemId] = entry
+                                    table.insert(reagents, entry)
+                                end
+                            else
+                                allReagentsResolved = false
+                            end
                         end
                     end
-                    if #reagents > 0 then
+                    if allReagentsResolved and requiredSlots > 0 and #reagents > 0 then
                         local recipeName = info.name or string.format("Recipe #%d", recipeID)
                         local key = tostring(recipeID) .. ":" .. tostring(recipeName)
                         local existingRecipe = charRecipes[key]
@@ -928,7 +1058,10 @@ function PF.RecipeScanner.GetKnownRecipes()
 
         local lookahead = (settings.includeTrainerRecommendations ~= false) and (settings.trainerSkillLookahead or 25) or 0
         for _, base in ipairs(PF.RecipeDatabase.GetAllBaselineRecipes()) do
-            if not seenByOutput[base.outputItemId] and base.profession and knownProfessions[base.profession] then
+            if not seenByOutput[base.outputItemId]
+                and base.profession
+                and knownProfessions[base.profession]
+                and IsBaselineOutputNameValid(base) then
                 local charRank = knownProfessions[base.profession]
                 local req = base.skillReq or 1
                 if req <= (charRank + lookahead) then
@@ -1292,6 +1425,8 @@ function PF.RecipeScanner.Init()
         pcall(frame.RegisterEvent, frame, "TRADE_SKILL_SHOW")
         pcall(frame.RegisterEvent, frame, "TRADE_SKILL_UPDATE")
         pcall(frame.RegisterEvent, frame, "TRADE_SKILL_DATA_SOURCE_CHANGED")
+        pcall(frame.RegisterEvent, frame, "TRADE_SKILL_LIST_UPDATE")
+        pcall(frame.RegisterEvent, frame, "NEW_RECIPE_LEARNED")
         pcall(frame.RegisterEvent, frame, "CRAFT_SHOW")
         pcall(frame.RegisterEvent, frame, "CRAFT_UPDATE")
         pcall(frame.RegisterEvent, frame, "PLAYER_ENTERING_WORLD")
@@ -1307,13 +1442,22 @@ function PF.RecipeScanner.Init()
                 return
             end
 
-            PF.RecipeScanner.ScanCurrentProfessionWindow()
+            local scanned = PF.RecipeScanner.ScanCurrentProfessionWindow()
+            if scanned == 0 and not pendingScanRetry
+                and (event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_DATA_SOURCE_CHANGED" or event == "NEW_RECIPE_LEARNED")
+                and _G.C_Timer and _G.C_Timer.After then
+                pendingScanRetry = true
+                _G.C_Timer.After(0.25, function()
+                    pendingScanRetry = false
+                    PF.RecipeScanner.ScanCurrentProfessionWindow()
+                end)
+            end
 
             if pendingOpenRecipe then
                 local now = (_G.GetTime and _G.GetTime()) or 0
                 if pendingOpenRecipe.expiresAt and now > pendingOpenRecipe.expiresAt then
                     pendingOpenRecipe = nil
-                elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_DATA_SOURCE_CHANGED" or event == "CRAFT_SHOW" then
+                elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_DATA_SOURCE_CHANGED" or event == "TRADE_SKILL_LIST_UPDATE" or event == "CRAFT_SHOW" then
                     if _G.C_TradeSkillUI and SelectModernRecipe(pendingOpenRecipe) then
                         pendingOpenRecipe = nil
                     elseif SelectLegacyRecipe(pendingOpenRecipe) then

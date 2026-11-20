@@ -13,6 +13,7 @@ local BASELINE_RECIPES = {
     -- ==========================================
     {
         name = "Smelt Copper",
+        outputName = "Copper Bar",
         profession = "Mining",
         skillReq = 1,
         source = "Trainer",
@@ -22,6 +23,7 @@ local BASELINE_RECIPES = {
     },
     {
         name = "Smelt Tin",
+        outputName = "Tin Bar",
         profession = "Mining",
         skillReq = 65,
         source = "Trainer",
@@ -31,6 +33,7 @@ local BASELINE_RECIPES = {
     },
     {
         name = "Smelt Bronze",
+        outputName = "Bronze Bar",
         profession = "Mining",
         skillReq = 65,
         source = "Trainer",
@@ -43,6 +46,7 @@ local BASELINE_RECIPES = {
     },
     {
         name = "Smelt Silver",
+        outputName = "Silver Bar",
         profession = "Mining",
         skillReq = 75,
         source = "Trainer",
@@ -52,6 +56,7 @@ local BASELINE_RECIPES = {
     },
     {
         name = "Smelt Iron",
+        outputName = "Iron Bar",
         profession = "Mining",
         skillReq = 125,
         source = "Trainer",
@@ -61,6 +66,7 @@ local BASELINE_RECIPES = {
     },
     {
         name = "Smelt Gold",
+        outputName = "Gold Bar",
         profession = "Mining",
         skillReq = 155,
         source = "Trainer",
@@ -70,6 +76,7 @@ local BASELINE_RECIPES = {
     },
     {
         name = "Smelt Steel",
+        outputName = "Steel Bar",
         profession = "Mining",
         skillReq = 165,
         source = "Trainer",
@@ -82,6 +89,7 @@ local BASELINE_RECIPES = {
     },
     {
         name = "Smelt Mithril",
+        outputName = "Mithril Bar",
         profession = "Mining",
         skillReq = 175,
         source = "Trainer",
@@ -91,6 +99,7 @@ local BASELINE_RECIPES = {
     },
     {
         name = "Smelt Truesilver",
+        outputName = "Truesilver Bar",
         profession = "Mining",
         skillReq = 230,
         source = "Trainer",
@@ -100,6 +109,7 @@ local BASELINE_RECIPES = {
     },
     {
         name = "Smelt Thorium",
+        outputName = "Thorium Bar",
         profession = "Mining",
         skillReq = 250,
         source = "Trainer",
@@ -125,7 +135,7 @@ local BASELINE_RECIPES = {
         profession = "Blacksmithing",
         skillReq = 35,
         source = "Trainer",
-        outputItemId = 2846,
+        outputItemId = 2852,
         avgMade = 1,
         reagents = { { itemId = 2840, name = "Copper Bar", count = 4 } },
     },
@@ -151,13 +161,15 @@ local BASELINE_RECIPES = {
         name = "Iridescent Hammer",
         profession = "Blacksmithing",
         skillReq = 140,
-        source = "Trainer",
-        outputItemId = 5540,
+        source = "Drop Plan",
+        outputItemId = 5541,
         avgMade = 1,
         reagents = {
             { itemId = 2841, name = "Bronze Bar", count = 10 },
+            { itemId = 3466, name = "Strong Flux", count = 1 },
             { itemId = 5500, name = "Iridescent Pearl", count = 1 },
-            { itemId = 2880, name = "Weak Flux", count = 2 },
+            { itemId = 3478, name = "Coarse Grinding Stone", count = 2 },
+            { itemId = 2319, name = "Medium Leather", count = 2 },
         },
     },
     {
@@ -174,7 +186,7 @@ local BASELINE_RECIPES = {
         profession = "Blacksmithing",
         skillReq = 205,
         source = "Trainer",
-        outputItemId = 7919,
+        outputItemId = 7918,
         avgMade = 1,
         reagents = {
             { itemId = 3860, name = "Mithril Bar", count = 8 },
@@ -182,28 +194,27 @@ local BASELINE_RECIPES = {
         },
     },
     {
-        name = "Heavy Mithril Gauntlets",
+        name = "Heavy Mithril Gauntlet",
         profession = "Blacksmithing",
         skillReq = 205,
         source = "Trainer",
-        outputItemId = 7920,
+        outputItemId = 7919,
         avgMade = 1,
         reagents = {
             { itemId = 3860, name = "Mithril Bar", count = 6 },
-            { itemId = 4339, name = "Bolt of Mageweave", count = 4 },
+            { itemId = 4338, name = "Mageweave Cloth", count = 4 },
         },
     },
     {
         name = "Heavy Mithril Pants",
         profession = "Blacksmithing",
         skillReq = 210,
-        source = "Vendor/Drop Plan",
-        outputItemId = 7941,
+        source = "Drop Plan",
+        outputItemId = 7921,
         avgMade = 1,
         reagents = {
             { itemId = 3860, name = "Mithril Bar", count = 10 },
             { itemId = 1705, name = "Lesser Moonstone", count = 2 },
-            { itemId = 3466, name = "Strong Flux", count = 1 },
         },
     },
     {
@@ -230,8 +241,8 @@ local BASELINE_RECIPES = {
             { itemId = 3860, name = "Mithril Bar", count = 16 },
             { itemId = 7971, name = "Black Pearl", count = 1 },
             { itemId = 1210, name = "Shadowgem", count = 4 },
-            { itemId = 4304, name = "Thick Leather", count = 2 },
             { itemId = 7966, name = "Solid Grinding Stone", count = 1 },
+            { itemId = 4304, name = "Thick Leather", count = 2 },
         },
     },
     {
@@ -277,8 +288,8 @@ local BASELINE_RECIPES = {
         avgMade = 1,
         reagents = {
             { itemId = 2996, name = "Bolt of Linen Cloth", count = 3 },
-            { itemId = 2324, name = "Bleach", count = 1 },
             { itemId = 2320, name = "Coarse Thread", count = 1 },
+            { itemId = 2324, name = "Bleach", count = 1 },
         },
     },
     {
@@ -321,8 +332,7 @@ local BASELINE_RECIPES = {
         avgMade = 1,
         reagents = {
             { itemId = 4305, name = "Bolt of Silk Cloth", count = 5 },
-            { itemId = 6260, name = "Blue Dye", count = 2 },
-            { itemId = 2321, name = "Fine Thread", count = 1 },
+            { itemId = 6260, name = "Blue Dye", count = 4 },
         },
     },
     {
@@ -338,11 +348,12 @@ local BASELINE_RECIPES = {
         name = "Crimson Silk Shoulders",
         profession = "Tailoring",
         skillReq = 190,
-        source = "Trainer",
-        outputItemId = 7058,
+        source = "Drop Pattern",
+        outputItemId = 7059,
         avgMade = 1,
         reagents = {
             { itemId = 4305, name = "Bolt of Silk Cloth", count = 5 },
+            { itemId = 6371, name = "Fire Oil", count = 2 },
             { itemId = 2604, name = "Red Dye", count = 2 },
             { itemId = 4291, name = "Silken Thread", count = 2 },
         },
@@ -377,7 +388,7 @@ local BASELINE_RECIPES = {
         outputItemId = 13856,
         avgMade = 1,
         reagents = {
-            { itemId = 14048, name = "Bolt of Runecloth", count = 2 },
+            { itemId = 14048, name = "Bolt of Runecloth", count = 3 },
             { itemId = 14341, name = "Rune Thread", count = 1 },
         },
     },
@@ -390,8 +401,8 @@ local BASELINE_RECIPES = {
         avgMade = 1,
         reagents = {
             { itemId = 14048, name = "Bolt of Runecloth", count = 4 },
-            { itemId = 3575, name = "Iron Bar", count = 4 },
-            { itemId = 4304, name = "Thick Leather", count = 2 },
+            { itemId = 14227, name = "Ironweb Spider Silk", count = 2 },
+            { itemId = 8170, name = "Rugged Leather", count = 4 },
             { itemId = 14341, name = "Rune Thread", count = 1 },
         },
     },
@@ -399,12 +410,12 @@ local BASELINE_RECIPES = {
         name = "Runecloth Headband",
         profession = "Tailoring",
         skillReq = 295,
-        source = "Trainer",
+        source = "Drop Pattern",
         outputItemId = 13866,
         avgMade = 1,
         reagents = {
             { itemId = 14048, name = "Bolt of Runecloth", count = 4 },
-            { itemId = 3575, name = "Iron Bar", count = 2 },
+            { itemId = 14227, name = "Ironweb Spider Silk", count = 2 },
             { itemId = 14341, name = "Rune Thread", count = 1 },
         },
     },
@@ -413,6 +424,20 @@ local BASELINE_RECIPES = {
     -- LEATHERWORKING
     -- ==========================================
     {
+        name = "Dark Leather Shoulders",
+        profession = "Leatherworking",
+        skillReq = 140,
+        source = "Drop Pattern",
+        outputItemId = 4252,
+        avgMade = 1,
+        reagents = {
+            { itemId = 2319, name = "Medium Leather", count = 12 },
+            { itemId = 3390, name = "Elixir of Lesser Agility", count = 1 },
+            { itemId = 4340, name = "Gray Dye", count = 1 },
+            { itemId = 2321, name = "Fine Thread", count = 2 },
+        },
+    },
+    {
         name = "Green Leather Armor",
         profession = "Leatherworking",
         skillReq = 155,
@@ -420,22 +445,9 @@ local BASELINE_RECIPES = {
         outputItemId = 4255,
         avgMade = 1,
         reagents = {
-            { itemId = 2319, name = "Medium Leather", count = 9 },
+            { itemId = 4234, name = "Heavy Leather", count = 9 },
             { itemId = 2605, name = "Green Dye", count = 2 },
             { itemId = 2321, name = "Fine Thread", count = 4 },
-        },
-    },
-    {
-        name = "Dark Leather Shoulders",
-        profession = "Leatherworking",
-        skillReq = 140,
-        source = "Vendor/Drop Pattern",
-        outputItemId = 4252,
-        avgMade = 1,
-        reagents = {
-            { itemId = 2319, name = "Medium Leather", count = 12 },
-            { itemId = 4340, name = "Gray Dye", count = 1 },
-            { itemId = 2321, name = "Fine Thread", count = 2 },
         },
     },
     {
@@ -449,7 +461,7 @@ local BASELINE_RECIPES = {
             { itemId = 4234, name = "Heavy Leather", count = 10 },
             { itemId = 4305, name = "Bolt of Silk Cloth", count = 2 },
             { itemId = 2325, name = "Black Dye", count = 2 },
-            { itemId = 3575, name = "Iron Bar", count = 1 },
+            { itemId = 7071, name = "Iron Buckle", count = 1 },
         },
     },
     {
@@ -457,7 +469,7 @@ local BASELINE_RECIPES = {
         profession = "Leatherworking",
         skillReq = 205,
         source = "Trainer",
-        outputItemId = 8189,
+        outputItemId = 8175,
         avgMade = 1,
         reagents = {
             { itemId = 4304, name = "Thick Leather", count = 7 },
@@ -469,7 +481,7 @@ local BASELINE_RECIPES = {
         profession = "Leatherworking",
         skillReq = 205,
         source = "Trainer",
-        outputItemId = 8191,
+        outputItemId = 8176,
         avgMade = 1,
         reagents = {
             { itemId = 4304, name = "Thick Leather", count = 5 },
@@ -477,10 +489,36 @@ local BASELINE_RECIPES = {
         },
     },
     {
+        name = "Turtle Scale Breastplate",
+        profession = "Leatherworking",
+        skillReq = 210,
+        source = "Trainer",
+        outputItemId = 8189,
+        avgMade = 1,
+        reagents = {
+            { itemId = 4304, name = "Thick Leather", count = 6 },
+            { itemId = 8167, name = "Turtle Scale", count = 12 },
+            { itemId = 8343, name = "Heavy Silken Thread", count = 1 },
+        },
+    },
+    {
+        name = "Turtle Scale Helm",
+        profession = "Leatherworking",
+        skillReq = 230,
+        source = "Trainer",
+        outputItemId = 8191,
+        avgMade = 1,
+        reagents = {
+            { itemId = 4304, name = "Thick Leather", count = 14 },
+            { itemId = 8167, name = "Turtle Scale", count = 24 },
+            { itemId = 8343, name = "Heavy Silken Thread", count = 1 },
+        },
+    },
+    {
         name = "Wicked Leather Bracers",
         profession = "Leatherworking",
         skillReq = 265,
-        source = "Vendor Pattern",
+        source = "Drop Pattern",
         outputItemId = 15084,
         avgMade = 1,
         reagents = {
@@ -493,7 +531,7 @@ local BASELINE_RECIPES = {
         name = "Wicked Leather Headband",
         profession = "Leatherworking",
         skillReq = 280,
-        source = "Vendor Pattern",
+        source = "Drop Pattern",
         outputItemId = 15086,
         avgMade = 1,
         reagents = {
@@ -527,7 +565,7 @@ local BASELINE_RECIPES = {
         avgMade = 1,
         reagents = {
             { itemId = 4470, name = "Simple Wood", count = 1 },
-            { itemId = 10939, name = "Greater Magic Essence", count = 1 },
+            { itemId = 10938, name = "Lesser Magic Essence", count = 2 },
         },
     },
     {
@@ -540,7 +578,6 @@ local BASELINE_RECIPES = {
         reagents = {
             { itemId = 11291, name = "Star Wood", count = 1 },
             { itemId = 11134, name = "Lesser Mystic Essence", count = 1 },
-            { itemId = 11083, name = "Soul Dust", count = 1 },
         },
     },
     {
@@ -548,11 +585,11 @@ local BASELINE_RECIPES = {
         profession = "Enchanting",
         skillReq = 175,
         source = "Trainer",
-        outputItemId = 11290,
+        outputItemId = 217287,
         avgMade = 1,
         reagents = {
             { itemId = 11291, name = "Star Wood", count = 1 },
-            { itemId = 11135, name = "Greater Mystic Essence", count = 1 },
+            { itemId = 11134, name = "Lesser Mystic Essence", count = 1 },
             { itemId = 11137, name = "Vision Dust", count = 1 },
         },
     },

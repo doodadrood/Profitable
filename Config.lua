@@ -23,7 +23,7 @@ Profitable_DB = Profitable_DB or {}
 _G.Profitable_DB = Profitable_DB
 
 local defaultConfig = {
-    version = 3,
+    version = 4,
     settings = {
         enabled = true,
         ahCutRate = 0.05,                        -- Standard 5% faction AH cut (auto-switches to 15% at Neutral AH)
@@ -321,6 +321,15 @@ function PF.LoadConfig(customDB)
         Profitable_DB.lastHonorableMentions = {}
         Profitable_DB.activePlay = nil
         Profitable_DB.version = 3
+    end
+
+    -- v4 migration: flush cached plays built from earlier baseline RecipeDatabase entries
+    -- that had mismatched item IDs or missing reagents (e.g. Turtle Scale / Nightscape / Leatherworking)
+    if prevVersion > 0 and prevVersion < 4 then
+        Profitable_DB.lastTopPlays = {}
+        Profitable_DB.lastHonorableMentions = {}
+        Profitable_DB.activePlay = nil
+        Profitable_DB.version = 4
     end
 
     return Profitable_DB

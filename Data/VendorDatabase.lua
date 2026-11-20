@@ -38,7 +38,7 @@ local STATIC_VENDOR_BUY_PRICES = {
     [4400]  = { price = 2000,   name = "Heavy Stock" },
     [6217]  = { price = 124,    name = "Copper Rod" },
     [10647] = { price = 2000,   name = "Engineer's Ink" },
-    [10648] = { price = 15,     name = "Common Parchment" },
+    [10648] = { price = 15,     name = "Blank Parchment" },
 
     -- Vials (Alchemy - unit price per 1 vial)
     [3371]  = { price = 4,      name = "Empty Vial" },
@@ -148,7 +148,12 @@ local SEED_ITEM_METADATA = {
     [8172]  = { name = "Cured Thick Hide",         quality = 1, itemLevel = 45, classID = 7, vendorSell = 700 },
     [8170]  = { name = "Rugged Leather",           quality = 1, itemLevel = 50, classID = 7, vendorSell = 500 },
     [8171]  = { name = "Rugged Hide",              quality = 1, itemLevel = 50, classID = 7, vendorSell = 500 },
-    [15407] = { name = "Cured Rugged Hide",        quality = 1, itemLevel = 55, classID = 7, vendorSell = 3000 },
+    [15407] = { name = "Cured Rugged Hide",        quality = 1, itemLevel = 50, classID = 7, vendorSell = 500 },
+    [8167]  = { name = "Turtle Scale",             quality = 1, itemLevel = 35, classID = 7, vendorSell = 100 },
+    [6371]  = { name = "Fire Oil",                 quality = 1, itemLevel = 25, classID = 7, vendorSell = 12 },
+    [14227] = { name = "Ironweb Spider Silk",      quality = 1, itemLevel = 50, classID = 7, vendorSell = 2500 },
+    [3390]  = { name = "Elixir of Lesser Agility", quality = 1, itemLevel = 28, classID = 0, vendorSell = 35 },
+    [7071]  = { name = "Iron Buckle",              quality = 1, itemLevel = 30, classID = 7, vendorSell = 100 },
 
     -- Gems
     [774]   = { name = "Malachite",                quality = 2, itemLevel = 10, classID = 7, vendorSell = 15 },
@@ -196,34 +201,37 @@ local SEED_ITEM_METADATA = {
     [20725] = { name = "Nexus Crystal",            quality = 4, itemLevel = 60, classID = 7, vendorSell = 0 },
 
     -- Common Crafted Items (Examples & Classics)
-    [2846]  = { name = "Copper Chain Pants",       quality = 1, itemLevel = 9,  classID = 4, invType = "INVTYPE_LEGS",     vendorSell = 107 },
-    [5540]  = { name = "Iridescent Hammer",        quality = 2, itemLevel = 26, classID = 2, invType = "INVTYPE_WEAPON",   vendorSell = 3194 },
-    [7967]  = { name = "Mithril Shield Spike",     quality = 2, itemLevel = 43, classID = 7, invType = "",                 vendorSell = 1500 },
-    [6238]  = { name = "Brown Linen Robe",         quality = 2, itemLevel = 10, classID = 4, invType = "INVTYPE_ROBE",     vendorSell = 64 },
-    [6241]  = { name = "White Linen Robe",         quality = 2, itemLevel = 10, classID = 4, invType = "INVTYPE_ROBE",     vendorSell = 66 },
-    [4312]  = { name = "Soft-soled Linen Boots",   quality = 2, itemLevel = 16, classID = 4, invType = "INVTYPE_FEET",     vendorSell = 200 },
-    [4324]  = { name = "Azure Silk Vest",          quality = 2, itemLevel = 35, classID = 4, invType = "INVTYPE_CHEST",    vendorSell = 1647 },
-    [7058]  = { name = "Crimson Silk Shoulders",   quality = 2, itemLevel = 38, classID = 4, invType = "INVTYPE_SHOULDER", vendorSell = 2166 },
-    [10008] = { name = "White Bandit Mask",        quality = 2, itemLevel = 43, classID = 4, invType = "INVTYPE_HEAD",     vendorSell = 2472 },
-    [13856] = { name = "Runecloth Belt",           quality = 2, itemLevel = 51, classID = 4, invType = "INVTYPE_WAIST",    vendorSell = 4247 },
-    [13864] = { name = "Runecloth Boots",          quality = 2, itemLevel = 54, classID = 4, invType = "INVTYPE_FEET",     vendorSell = 10035 },
-    [13866] = { name = "Runecloth Headband",       quality = 2, itemLevel = 57, classID = 4, invType = "INVTYPE_HEAD",     vendorSell = 9188 },
-    [15086] = { name = "Wicked Leather Headband",  quality = 2, itemLevel = 56, classID = 4, invType = "INVTYPE_HEAD",     vendorSell = 9821 },
-    [15084] = { name = "Wicked Leather Bracers",   quality = 2, itemLevel = 53, classID = 4, invType = "INVTYPE_WRIST",    vendorSell = 4831 },
-    [4255]  = { name = "Green Leather Armor",      quality = 2, itemLevel = 26, classID = 4, invType = "INVTYPE_CHEST",    vendorSell = 1140 },
-    [4252]  = { name = "Dark Leather Shoulders",   quality = 2, itemLevel = 30, classID = 4, invType = "INVTYPE_SHOULDER", vendorSell = 1480 },
-    [7387]  = { name = "Dusky Belt",               quality = 2, itemLevel = 37, classID = 4, invType = "INVTYPE_WAIST",    vendorSell = 1423 },
-    [8189]  = { name = "Nightscape Tunic",         quality = 2, itemLevel = 42, classID = 4, invType = "INVTYPE_CHEST",    vendorSell = 3893 },
-    [8191]  = { name = "Nightscape Headband",      quality = 2, itemLevel = 43, classID = 4, invType = "INVTYPE_HEAD",     vendorSell = 3370 },
-    [11287] = { name = "Lesser Magic Wand",        quality = 2, itemLevel = 13, classID = 2, invType = "INVTYPE_RANGED",   vendorSell = 519 },
-    [11288] = { name = "Greater Magic Wand",       quality = 2, itemLevel = 18, classID = 2, invType = "INVTYPE_RANGED",   vendorSell = 1546 },
-    [11289] = { name = "Lesser Mystic Wand",       quality = 2, itemLevel = 30, classID = 2, invType = "INVTYPE_RANGED",   vendorSell = 4159 },
-    [11290] = { name = "Greater Mystic Wand",      quality = 2, itemLevel = 35, classID = 2, invType = "INVTYPE_RANGED",   vendorSell = 8656 },
-    [3853]  = { name = "Moonsteel Broadsword",     quality = 3, itemLevel = 36, classID = 2, invType = "INVTYPE_2HWEAPON", vendorSell = 12450 },
-    [7941]  = { name = "Heavy Mithril Pants",      quality = 2, itemLevel = 42, classID = 4, invType = "INVTYPE_LEGS",     vendorSell = 4560 },
-    [7920]  = { name = "Heavy Mithril Gauntlets",  quality = 2, itemLevel = 40, classID = 4, invType = "INVTYPE_HAND",     vendorSell = 2490 },
-    [7919]  = { name = "Heavy Mithril Shoulder",   quality = 2, itemLevel = 40, classID = 4, invType = "INVTYPE_SHOULDER", vendorSell = 2780 },
-    [7945]  = { name = "Big Black Mace",           quality = 2, itemLevel = 45, classID = 2, invType = "INVTYPE_2HWEAPON", vendorSell = 7105 },
+    [2852]  = { name = "Copper Chain Pants",       quality = 2, itemLevel = 10, classID = 4, invType = "INVTYPE_LEGS",     vendorSell = 67 },
+    [5541]  = { name = "Iridescent Hammer",        quality = 2, itemLevel = 28, classID = 2, invType = "INVTYPE_WEAPON",   vendorSell = 3693 },
+    [7967]  = { name = "Mithril Shield Spike",     quality = 2, itemLevel = 43, classID = 0, invType = "",                 vendorSell = 250 },
+    [6238]  = { name = "Brown Linen Robe",         quality = 2, itemLevel = 10, classID = 4, invType = "INVTYPE_ROBE",     vendorSell = 98 },
+    [6241]  = { name = "White Linen Robe",         quality = 2, itemLevel = 10, classID = 4, invType = "INVTYPE_ROBE",     vendorSell = 99 },
+    [4312]  = { name = "Soft-soled Linen Boots",   quality = 2, itemLevel = 16, classID = 4, invType = "INVTYPE_FEET",     vendorSell = 237 },
+    [4324]  = { name = "Azure Silk Vest",          quality = 2, itemLevel = 30, classID = 4, invType = "INVTYPE_CHEST",    vendorSell = 1874 },
+    [7059]  = { name = "Crimson Silk Shoulders",   quality = 2, itemLevel = 38, classID = 4, invType = "INVTYPE_SHOULDER", vendorSell = 2781 },
+    [10008] = { name = "White Bandit Mask",        quality = 2, itemLevel = 43, classID = 4, invType = "INVTYPE_HEAD",     vendorSell = 3492 },
+    [13856] = { name = "Runecloth Belt",           quality = 2, itemLevel = 51, classID = 4, invType = "INVTYPE_WAIST",    vendorSell = 5112 },
+    [13864] = { name = "Runecloth Boots",          quality = 2, itemLevel = 56, classID = 4, invType = "INVTYPE_FEET",     vendorSell = 9553 },
+    [13866] = { name = "Runecloth Headband",       quality = 2, itemLevel = 59, classID = 4, invType = "INVTYPE_HEAD",     vendorSell = 11358 },
+    [15086] = { name = "Wicked Leather Headband",  quality = 2, itemLevel = 56, classID = 4, invType = "INVTYPE_HEAD",     vendorSell = 13154 },
+    [15084] = { name = "Wicked Leather Bracers",   quality = 2, itemLevel = 53, classID = 4, invType = "INVTYPE_WRIST",    vendorSell = 7311 },
+    [4255]  = { name = "Green Leather Armor",      quality = 2, itemLevel = 31, classID = 4, invType = "INVTYPE_CHEST",    vendorSell = 2366 },
+    [4252]  = { name = "Dark Leather Shoulders",   quality = 2, itemLevel = 28, classID = 4, invType = "INVTYPE_SHOULDER", vendorSell = 1457 },
+    [7387]  = { name = "Dusky Belt",               quality = 2, itemLevel = 39, classID = 4, invType = "INVTYPE_WAIST",    vendorSell = 2587 },
+    [8175]  = { name = "Nightscape Tunic",         quality = 2, itemLevel = 41, classID = 4, invType = "INVTYPE_CHEST",    vendorSell = 3881 },
+    [8176]  = { name = "Nightscape Headband",      quality = 2, itemLevel = 41, classID = 4, invType = "INVTYPE_HEAD",     vendorSell = 2922 },
+    [8189]  = { name = "Turtle Scale Breastplate", quality = 2, itemLevel = 42, classID = 4, invType = "INVTYPE_CHEST",    vendorSell = 7567 },
+    [8191]  = { name = "Turtle Scale Helm",        quality = 2, itemLevel = 46, classID = 4, invType = "INVTYPE_HEAD",     vendorSell = 7780 },
+    [11287] = { name = "Lesser Magic Wand",        quality = 2, itemLevel = 15, classID = 2, invType = "INVTYPE_RANGED",   vendorSell = 110 },
+    [11288] = { name = "Greater Magic Wand",       quality = 2, itemLevel = 23, classID = 2, invType = "INVTYPE_RANGED",   vendorSell = 200 },
+    [11289] = { name = "Lesser Mystic Wand",       quality = 2, itemLevel = 31, classID = 2, invType = "INVTYPE_RANGED",   vendorSell = 450 },
+    [11290] = { name = "Greater Mystic Wand",      quality = 2, itemLevel = 35, classID = 2, invType = "INVTYPE_RANGED",   vendorSell = 600 },
+    [217287]= { name = "Greater Mystic Wand",      quality = 2, itemLevel = 35, classID = 2, invType = "INVTYPE_RANGED",   vendorSell = 600 },
+    [3853]  = { name = "Moonsteel Broadsword",     quality = 2, itemLevel = 36, classID = 2, invType = "INVTYPE_2HWEAPON", vendorSell = 8615 },
+    [7918]  = { name = "Heavy Mithril Shoulder",   quality = 2, itemLevel = 41, classID = 4, invType = "INVTYPE_SHOULDER", vendorSell = 3701 },
+    [7919]  = { name = "Heavy Mithril Gauntlet",   quality = 2, itemLevel = 41, classID = 4, invType = "INVTYPE_HAND",     vendorSell = 2476 },
+    [7921]  = { name = "Heavy Mithril Pants",      quality = 2, itemLevel = 42, classID = 4, invType = "INVTYPE_LEGS",     vendorSell = 5387 },
+    [7945]  = { name = "Big Black Mace",           quality = 2, itemLevel = 46, classID = 2, invType = "INVTYPE_2HWEAPON", vendorSell = 17291 },
 }
 
 for id, entry in pairs(STATIC_VENDOR_BUY_PRICES) do
@@ -304,7 +312,7 @@ local function QueryGameItemInfo(target, skipServerRequest)
     }
 end
 
-function PF.VendorDatabase.GetItemMetadata(itemId, itemLink, skipServerRequest)
+function PF.VendorDatabase.GetLiveOrCachedItemMetadata(itemId, itemLink, skipServerRequest)
     if not itemId and type(itemLink) == "string" then
         itemId = tonumber(itemLink:match("item:(%d+)"))
     end
@@ -312,7 +320,6 @@ function PF.VendorDatabase.GetItemMetadata(itemId, itemLink, skipServerRequest)
         return nil
     end
 
-    -- Check cached metadata first (O(1), zero GetItemInfo calls or table allocations during 7,000+ item scans)
     local cached = Profitable_DB and Profitable_DB.itemCache and Profitable_DB.itemCache[itemId]
     if cached and cached.name and cached.classID ~= nil and cached.vendorSell ~= nil then
         if itemLink and not cached.link then
@@ -331,6 +338,22 @@ function PF.VendorDatabase.GetItemMetadata(itemId, itemLink, skipServerRequest)
 
     if cached then
         return cached
+    end
+
+    return nil
+end
+
+function PF.VendorDatabase.GetItemMetadata(itemId, itemLink, skipServerRequest)
+    local resolved = PF.VendorDatabase.GetLiveOrCachedItemMetadata(itemId, itemLink, skipServerRequest)
+    if resolved then
+        return resolved
+    end
+
+    if not itemId and type(itemLink) == "string" then
+        itemId = tonumber(itemLink:match("item:(%d+)"))
+    end
+    if not itemId or itemId <= 0 then
+        return nil
     end
 
     local seed = SEED_ITEM_METADATA[itemId]
