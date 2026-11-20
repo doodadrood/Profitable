@@ -1275,8 +1275,11 @@ do
     Assert(#craftedRecipeIds == 0, "Clicking 'Open Cooking' NEVER calls C_TradeSkillUI.CraftRecipe")
 
     -- Simulate TRADE_SKILL_DATA_SOURCE_CHANGED firing after OpenTradeSkill opens ProfessionsFrame
+    -- Must select via C-side C_TradeSkillUI.OpenRecipe and NEVER touch ProfessionsFrame.CraftingPage:SelectRecipe (taint!)
+    local openRecipeCallsBeforeEvent = #openedRecipeIds
     _G.PF.RecipeScanner.frame:Trigger("TRADE_SKILL_DATA_SOURCE_CHANGED")
-    Assert(#selectedModernRecipes >= 1 and selectedModernRecipes[1] == 15856, "TRADE_SKILL_DATA_SOURCE_CHANGED selects pending recipe in ProfessionsFrame.CraftingPage")
+    Assert(#openedRecipeIds == openRecipeCallsBeforeEvent + 1 and openedRecipeIds[#openedRecipeIds] == 15856, "TRADE_SKILL_DATA_SOURCE_CHANGED selects pending recipe via C_TradeSkillUI.OpenRecipe")
+    Assert(#selectedModernRecipes == 0, "TRADE_SKILL_DATA_SOURCE_CHANGED NEVER calls ProfessionsFrame.CraftingPage:SelectRecipe directly (prevents UIPanel/ProfessionsFrame taint)")
 
     -- 21E. Hot Wolf Ribs stale 1s67c price is live-validated on AH and eliminated when real AH price is 3s+
     local now21 = math.floor(Mock.currentTime)
@@ -1705,6 +1708,161 @@ do
     _G.C_AuctionHouse = origCAH
     _G.AuctionHouseFrame = origAHFrame
     _G.AuctionFrame = origAuctionFrame
+end
+
+-- 24. Regression Tests: Blizzard UI Taint Prevention (GameTooltip / ContainerFrame / ProfessionsFrame / AuctionHouseFrame)
+do
+    local origTooltip = _G.GameTooltip
+    local origTooltipProcessor = _G.TooltipDataProcessor
+    local origEnum = _G.Enum
+    local origInCombat = _G.InCombatLockdown
+    local origHookSecure = _G.hooksecurefunc
+    local origCContainer = _G.C_Container
+
+    -- 24A. GameTooltip must NEVER receive custom fields (_pcfHooked / _pcfStackCount) or Show() calls inside TooltipDataProcessor
+    local showCalls24 = 0
+    local addedLines24 = {}
+    local tooltipHooks24 = {}
+    local bagItemHookCb = nil
+    local postCallCb = nil
+
+    _G.hooksecurefunc = function(tbl, method, fn)
+        if tbl == _G.GameTooltip and method == "SetBagItem" then
+            bagItemHookCb = fn
+        end
+    end
+    _G.C_Container = {
+        GetContainerItemInfo = function(bag, slot)
+            if bag == 0 and slot == 1 then
+                return { itemID = 2589, stackCount = 5 }
+            end
+            return nil
+        end,
+    }
+    _G.Enum = { TooltipDataType = { Item = 0 } }
+    _G.TooltipDataProcessor = {
+        AddTooltipPostCall = function(dataType, cb)
+            if dataType == 0 then postCallCb = cb end
+        end,
+    }
+
+    local strictTooltip = {
+        shown = true,
+        IsShown = function(self) return self.shown end,
+        IsForbidden = function() return false end,
+        GetName = function() return "GameTooltip" end,
+        NumLines = function() return #addedLines24 end,
+        GetItem = function() return "Linen Cloth", "|cffffffff|Hitem:2589:0:0:0|h[Linen Cloth]|h|r" end,
+        SetBagItem = function() end,
+        AddLine = function(_, text) table.insert(addedLines24, text) end,
+        Show = function() showCalls24 = showCalls24 + 1 end,
+        HookScript = function(_, script, fn) tooltipHooks24[script] = fn end,
+    }
+    _G.GameTooltip = strictTooltip
+    _G.PCF_DB.prices[2589] = { minBuyout = 25, minBid = 25, count = 200, lastUpdated = math.floor(Mock.currentTime), source = "Scan" }
+    _G.PCF_DB.settings.showTooltip = true
+    _G.PCF.Tooltip._processorHooked = nil
+
+    _G.PCF.Tooltip.Init()
+    Assert(strictTooltip._pcfHooked == nil, "PCF.Tooltip.Init NEVER writes _pcfHooked onto GameTooltip")
+    Assert(tooltipHooks24["OnTooltipSetItem"] == nil, "PCF.Tooltip.Init skips legacy OnTooltipSetItem HookScript when TooltipDataProcessor is present")
+    Assert(type(bagItemHookCb) == "function" and type(postCallCb) == "function", "PCF.Tooltip.Init registers SetBagItem hook and TooltipDataProcessor post-call")
+
+    -- Simulate hovering a 5-stack bag item (SetBagItem -> TooltipDataProcessor post-call)
+    bagItemHookCb(strictTooltip, 0, 1)
+    Assert(strictTooltip._pcfStackCount == nil, "SetBagItem hook stores stack count in local weak table and NEVER writes _pcfStackCount onto GameTooltip")
+    postCallCb(strictTooltip, { id = 2589 })
+    Assert(#addedLines24 == 1 and addedLines24[1]:find("^AH%s+Price:") ~= nil and addedLines24[1]:find("1|T") ~= nil, "TooltipDataProcessor post-call appends stack + unit AH Price line using local weak-table stack count")
+    Assert(showCalls24 == 0, "TooltipDataProcessor post-call NEVER calls GameTooltip:Show() (prevents GameTooltip/ContainerFrame taint)")
+
+    -- Simulate OnTooltipCleared / OnHide -> must NOT write _pcfStackCount onto GameTooltip
+    tooltipHooks24["OnTooltipCleared"](strictTooltip)
+    tooltipHooks24["OnHide"](strictTooltip)
+    Assert(strictTooltip._pcfStackCount == nil, "OnTooltipCleared/OnHide never touch properties on GameTooltip")
+
+    -- Simulate forbidden tooltip passed to TooltipDataProcessor -> must be ignored completely
+    local forbiddenAdded = 0
+    local forbiddenTooltip = {
+        IsForbidden = function() return true end,
+        AddLine = function() forbiddenAdded = forbiddenAdded + 1 end,
+    }
+    postCallCb(forbiddenTooltip, { id = 2589 })
+    Assert(forbiddenAdded == 0, "TooltipDataProcessor post-call ignores forbidden tooltips")
+
+    -- Simulate RefreshVisibleTooltip -> must NEVER call GameTooltip:Show() and must skip during combat
+    _G.PCF.Tooltip.RefreshVisibleTooltip()
+    Assert(showCalls24 == 0, "PCF.Tooltip.RefreshVisibleTooltip never calls GameTooltip:Show()")
+
+    _G.InCombatLockdown = function() return true end
+    local combatOpened = _G.PF.RecipeScanner.OpenRecipe({ recipeId = 15856, name = "Hot Wolf Ribs", profession = "Cooking" })
+    Assert(combatOpened == false, "PF.RecipeScanner.OpenRecipe refuses to open profession window during combat lockdown")
+
+    -- Restore globals
+    _G.GameTooltip = origTooltip
+    _G.TooltipDataProcessor = origTooltipProcessor
+    _G.Enum = origEnum
+    _G.InCombatLockdown = origInCombat
+    _G.hooksecurefunc = origHookSecure
+    _G.C_Container = origCContainer
+end
+
+-- 25. Regression Tests: Classic Epic Disenchant Yield (Lifestone iLvl 56 -> 1x Nexus Crystal, NOT 1.5x)
+do
+    local now25 = math.floor(Mock.currentTime)
+    _G.Profitable_DB.itemCache[833] = {
+        name = "Lifestone",
+        link = "|cffa335ee|Hitem:833:0:0:0|h[Lifestone]|h|r",
+        quality = 4,
+        itemLevel = 56,
+        classID = 4,
+        subClassID = 0,
+        invType = "INVTYPE_TRINKET",
+        vendorSell = 25000,
+    }
+
+    local drops833 = _G.PF.DisenchantDatabase.GetDisenchantDrops(833)
+    Assert(
+        drops833 ~= nil and #drops833 == 1 and drops833[1].itemId == 20725 and drops833[1].avgQty == 1.0 and drops833[1].maxQty == 1,
+        "Lifestone (iLvl 56 Epic) yields exactly 1.0x Nexus Crystal (never 1.5x)"
+    )
+
+    local eval833 = _G.PF.DisenchantDatabase.EvaluateDisenchant(833, nil, function(id)
+        if id == 20725 then return 445000 end -- 44g 50s
+        return nil
+    end, 0.05)
+    Assert(
+        eval833 ~= nil and eval833.grossValue == 445000 and eval833.netValue == math.floor(445000 * 0.95 + 0.5),
+        "Lifestone DE net expected revenue at 44g 50s Nexus Crystal is 42g 27s 50c (not 63g+)"
+    )
+
+    _G.Profitable_DB.orderBookCache = {}
+    _G.PCF_DB.prices = {
+        [833]   = { minBuyout = 470000, count = 1,  lastUpdated = now25, source = "Scan" }, -- Lifestone @ 47g
+        [20725] = { minBuyout = 445000, count = 20, lastUpdated = now25, source = "Scan" }, -- Nexus Crystal @ 44g 50s
+    }
+    _G.Profitable_DB.settings.assumeCanDisenchant = true
+    local topUnprofitable = _G.PF.OpportunityEngine.FindTopOpportunities(5000000)
+    local foundBadLifestone = false
+    for _, opp in ipairs(topUnprofitable) do
+        if opp.itemId == 833 or (opp.deTargetMatId == 20725) then
+            foundBadLifestone = true
+        end
+    end
+    Assert(foundBadLifestone == false, "Lifestone at 47g is NOT suggested as profitable when Nexus Crystal is 44g 50s")
+
+    -- When Lifestone IS genuinely cheap (35g vs 44g 50s Nexus Crystal -> 42g 27s 50c net), profit is +7g 27s 50c
+    _G.PCF_DB.prices[833].minBuyout = 350000
+    local topProfitable = _G.PF.OpportunityEngine.FindTopOpportunities(5000000)
+    local foundGoodLifestone = nil
+    for _, opp in ipairs(topProfitable) do
+        if opp.itemId == 833 or (opp.deBreakdown and opp.deBreakdown.primaryMat and opp.deBreakdown.primaryMat.itemId == 20725) then
+            foundGoodLifestone = opp
+        end
+    end
+    Assert(
+        foundGoodLifestone ~= nil and foundGoodLifestone.totalProfit == (math.floor(445000 * 0.95 + 0.5) - 350000),
+        "Cheap Lifestone (35g) is accurately evaluated for 1x Nexus Crystal profit (+7g 27s 50c)"
+    )
 end
 
 print("\nAll Profitable test assertions passed successfully!")

@@ -144,7 +144,8 @@ local EPIC_BRACKETS = {
     { minIlvl = 1,  maxIlvl = 45, itemId = 11177, minQty = 2, maxQty = 4 },
     { minIlvl = 46, maxIlvl = 50, itemId = 11178, minQty = 2, maxQty = 4 },
     { minIlvl = 51, maxIlvl = 55, itemId = 14343, minQty = 2, maxQty = 4 },
-    { minIlvl = 56, maxIlvl = 999, itemId = 20725, minQty = 1, maxQty = 2 },
+    -- Classic / WoW: Forever iLvl 56+ Epics always disenchant into exactly 1x Nexus Crystal (never 1-2x)
+    { minIlvl = 56, maxIlvl = 999, itemId = 20725, minQty = 1, maxQty = 1 },
 }
 
 function PF.DisenchantDatabase.CanDisenchant(itemId, itemLink)

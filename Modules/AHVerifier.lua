@@ -637,6 +637,7 @@ ScheduleNextVerification = function(delay)
 end
 
 local function EnsureAuctionBuyViewOpen()
+    if _G.InCombatLockdown and _G.InCombatLockdown() then return end
     local ah = _G.AuctionHouseFrame
     if not ah then return end
     local sellShown = (ah.CommoditiesSellFrame and ah.CommoditiesSellFrame.IsShown and ah.CommoditiesSellFrame:IsShown())
@@ -701,6 +702,7 @@ end
 -- Only invoke OnQuantityChanged once commodity listings are loaded so we never interfere
 -- with an in-flight search query while CommoditiesBuyFrame is still "Searching...".
 local function SetDefaultCommoditiesUIQuantity(desiredQuantity, triggerChangeHandler)
+    if _G.InCombatLockdown and _G.InCombatLockdown() then return end
     local ahFrame = _G.AuctionHouseFrame
     local commFrame = ahFrame and ahFrame.CommoditiesBuyFrame
     if not commFrame or not commFrame.BuyDisplay then return end
@@ -784,6 +786,7 @@ end
 
 OpenItemKeyInDefaultAH = function(itemId, itemKey, itemKeyInfo, desiredQuantity, existingToken)
     if not _G.AuctionHouseFrame then return end
+    if _G.InCombatLockdown and _G.InCombatLockdown() then return end
 
     local myToken = existingToken
     if not myToken then
@@ -849,7 +852,6 @@ OpenItemKeyInDefaultAH = function(itemId, itemKey, itemKeyInfo, desiredQuantity,
         pcall(_G.C_AuctionHouse.SendSearchQuery, itemKey, sorts, false)
         SetDefaultCommoditiesUIQuantity(desiredQuantity, false)
     elseif ahFrame.SelectBrowseResult then
-        EnsureAuctionBuyViewOpen()
         pcall(ahFrame.SelectBrowseResult, ahFrame, {
             itemKey = itemKey,
             minPrice = minPrice,
@@ -1323,12 +1325,8 @@ function PF.AHVerifier.BuyNextCheapListing(itemId, itemName, maxUnitPrice, neede
                 return false, 0, 0, "THROTTLED"
             end
 
-            -- Select the auction in the Default Blizzard ItemBuyFrame if exposed, then call PlaceBid directly
-            -- WITHOUT calling SearchItemOnAH (which would send a new search query and drop PlaceBid)!
-            if _G.AuctionHouseFrame and _G.AuctionHouseFrame.ItemBuyFrame and _G.AuctionHouseFrame.ItemBuyFrame.SetAuction then
-                pcall(_G.AuctionHouseFrame.ItemBuyFrame.SetAuction, _G.AuctionHouseFrame.ItemBuyFrame, bestAuction.auctionID)
-            end
-
+            -- Call PlaceBid directly using the auctionID WITHOUT mutating ItemBuyFrame or calling
+            -- SearchItemOnAH (which would send a new search query and drop PlaceBid)!
             if _G.C_AuctionHouse.PlaceBid then
                 purchasedAuctionIds[bestAuction.auctionID] = true
                 pcall(_G.C_AuctionHouse.PlaceBid, bestAuction.auctionID, bestAuction.buyoutAmount)

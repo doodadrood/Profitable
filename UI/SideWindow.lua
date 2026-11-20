@@ -124,21 +124,30 @@ local function IsPCFScannerRunning()
     return false
 end
 
+local hookedPCFScanButtons = setmetatable({}, { __mode = "k" })
+
 local function HookPCFScanButtonIfAvailable()
     local btn = _G.PCF and _G.PCF.Scanner and _G.PCF.Scanner.scanButton
-    if not btn or btn._pfHookedSetText or type(btn.SetText) ~= "function" then
+    if not btn or hookedPCFScanButtons[btn] or type(btn.SetText) ~= "function" then
         return
     end
-    btn._pfHookedSetText = true
-    local origSetText = btn.SetText
-    btn.SetText = function(self, text, ...)
-        local res = origSetText(self, text, ...)
+    hookedPCFScanButtons[btn] = true
+    local function onSetText()
         if sideFrame and (not sideFrame.IsShown or sideFrame:IsShown()) then
             PF.SideWindow.Refresh()
         elseif onboardingFrame and (not onboardingFrame.IsShown or onboardingFrame:IsShown()) then
             PF.SideWindow.RefreshOnboardingPopup()
         end
-        return res
+    end
+    if _G.hooksecurefunc then
+        pcall(_G.hooksecurefunc, btn, "SetText", onSetText)
+    else
+        local origSetText = btn.SetText
+        btn.SetText = function(self, text, ...)
+            local res = origSetText(self, text, ...)
+            onSetText()
+            return res
+        end
     end
 end
 

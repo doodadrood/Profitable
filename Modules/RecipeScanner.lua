@@ -770,23 +770,16 @@ end
 
 local function SelectModernRecipe(recipe)
     if not recipe or not _G.C_TradeSkillUI then return false end
+    if _G.InCombatLockdown and _G.InCombatLockdown() then return false end
     local targetId = FindModernRecipeIdInOpenWindow(recipe)
     if not targetId then return false end
 
-    local pf = _G.ProfessionsFrame
-    if pf and (not pf.IsShown or pf:IsShown()) and pf.CraftingPage and pf.CraftingPage.SelectRecipe and _G.C_TradeSkillUI.GetRecipeInfo then
-        local okInfo, recipeInfo = pcall(_G.C_TradeSkillUI.GetRecipeInfo, targetId)
-        if okInfo and type(recipeInfo) == "table" then
-            local okSel = pcall(pf.CraftingPage.SelectRecipe, pf.CraftingPage, recipeInfo)
-            if okSel then
-                return true
-            end
-        end
-    end
-
+    -- Always use Blizzard's C-side C_TradeSkillUI.OpenRecipe API rather than invoking
+    -- ProfessionsFrame.CraftingPage:SelectRecipe directly from addon Lua, which taints
+    -- ProfessionsFrame and Blizzard's UIPanel state.
     if _G.C_TradeSkillUI.OpenRecipe then
-        local okOpen = pcall(_G.C_TradeSkillUI.OpenRecipe, targetId)
-        if okOpen then
+        local okOpen, openRes = pcall(_G.C_TradeSkillUI.OpenRecipe, targetId)
+        if okOpen and openRes ~= false then
             return true
         end
     end
@@ -836,6 +829,10 @@ end
 
 function PF.RecipeScanner.OpenRecipe(recipe)
     if not recipe then return false end
+    if _G.InCombatLockdown and _G.InCombatLockdown() then
+        print("|cffff9900[Profitable]|r Cannot open profession windows during combat.")
+        return false
+    end
 
     PF.RecipeScanner.NormalizeRecipeProfession(recipe)
 
