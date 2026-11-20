@@ -204,10 +204,12 @@ local function ResolveSkillLineId(recipe)
     local profName = recipe.profession
     if type(profName) == "string" and profName ~= "" then
         if _G.GetProfessions and _G.GetProfessionInfo then
-            local okProfs, p1, p2, arch, fish, cook = pcall(_G.GetProfessions)
+            local okProfs, p1, p2, arch, fish, cook, firstAid = pcall(_G.GetProfessions)
             if okProfs then
                 local targetLower = profName:lower()
-                for _, idx in ipairs({ p1, p2, arch, fish, cook }) do
+                local slots = { p1, p2, arch, fish, cook, firstAid }
+                for slotIdx = 1, 6 do
+                    local idx = slots[slotIdx]
                     if type(idx) == "number" then
                         local okInfo, pName, _, _, _, _, _, skillLine = pcall(_G.GetProfessionInfo, idx)
                         if okInfo and type(pName) == "string" and pName:lower() == targetLower and type(skillLine) == "number" and skillLine > 0 then
@@ -226,6 +228,93 @@ local function ResolveSkillLineId(recipe)
     end
 
     return nil
+end
+
+local function GetCurrentCharacterProfessions()
+    local profNames = {}
+    local profNamesLower = {}
+    local skillLineIds = {}
+    local skillRanks = {}
+    local hasAuthData = false
+
+    if PF.RecipeDatabase and PF.RecipeDatabase.GetCharacterSkillRanks then
+        local rawRanks, hasSkillData = PF.RecipeDatabase.GetCharacterSkillRanks()
+        skillRanks = rawRanks or {}
+        hasAuthData = (hasSkillData == true)
+        for rawName, info in pairs(skillRanks) do
+            local rank = (type(info) == "table" and info.rank) or 1
+            local skillLine = type(info) == "table" and info.skillLine or nil
+            local displayName = type(info) == "table" and info.displayName or nil
+            local cleanName = CleanProfessionName(rawName, skillLine)
+            if cleanName then
+                profNames[cleanName] = math.max(profNames[cleanName] or 0, rank)
+                profNamesLower[cleanName:lower()] = math.max(profNamesLower[cleanName:lower()] or 0, rank)
+                local mappedId = skillLine or PROFESSION_TO_SKILL_LINE_ID[cleanName]
+                if mappedId then
+                    skillLineIds[mappedId] = math.max(skillLineIds[mappedId] or 0, rank)
+                end
+            end
+            if type(rawName) == "string" and rawName ~= "" then
+                profNames[rawName] = math.max(profNames[rawName] or 0, rank)
+                profNamesLower[rawName:lower()] = math.max(profNamesLower[rawName:lower()] or 0, rank)
+                local rawId = PROFESSION_TO_SKILL_LINE_ID[rawName]
+                if rawId then
+                    skillLineIds[rawId] = math.max(skillLineIds[rawId] or 0, rank)
+                end
+            end
+            if type(displayName) == "string" and displayName ~= "" then
+                profNames[displayName] = math.max(profNames[displayName] or 0, rank)
+                profNamesLower[displayName:lower()] = math.max(profNamesLower[displayName:lower()] or 0, rank)
+            end
+        end
+    end
+
+    return profNames, profNamesLower, skillLineIds, hasAuthData, skillRanks
+end
+
+local function IsRecipeLearnedByCurrentCharacter(recipe, profNames, profNamesLower, skillLineIds, hasAuthData)
+    if type(recipe) ~= "table" then
+        return false
+    end
+
+    if type(recipe.recipeId) == "number" and recipe.recipeId > 0
+        and _G.C_TradeSkillUI and _G.C_TradeSkillUI.IsRecipeProfessionLearned then
+        local okLearned, isLearned = pcall(_G.C_TradeSkillUI.IsRecipeProfessionLearned, recipe.recipeId)
+        if okLearned and isLearned == false then
+            return false
+        end
+    end
+
+    if not hasAuthData then
+        return true
+    end
+
+    if type(recipe.professionId) == "number" and recipe.professionId > 0 then
+        if skillLineIds[recipe.professionId] then
+            return true
+        end
+        local canonicalFromId = SKILL_LINE_ID_TO_PROFESSION[recipe.professionId]
+        if canonicalFromId and (profNames[canonicalFromId] or profNamesLower[canonicalFromId:lower()]) then
+            return true
+        end
+    end
+
+    if type(recipe.profession) == "string" and recipe.profession ~= "" then
+        local clean = CleanProfessionName(recipe.profession, recipe.professionId) or recipe.profession
+        if profNames[clean] or profNamesLower[clean:lower()] then
+            return true
+        end
+        local mappedId = PROFESSION_TO_SKILL_LINE_ID[clean]
+        if mappedId and skillLineIds[mappedId] then
+            return true
+        end
+        if INVALID_CRAFTING_PROFESSIONS[clean] and next(skillLineIds) ~= nil then
+            return true
+        end
+        return false
+    end
+
+    return next(skillLineIds) ~= nil
 end
 
 function PF.RecipeScanner.NormalizeRecipeProfession(recipe)
@@ -260,6 +349,78 @@ function PF.RecipeScanner.NormalizeRecipeProfession(recipe)
     return changed
 end
 
+function PF.RecipeScanner.PruneUnlearnedCharRecipes()
+    if type(Profitable_DB) ~= "table" or type(Profitable_DB.charRecipes) ~= "table" then
+        return 0
+    end
+
+    local profNames, profNamesLower, skillLineIds, hasAuthData = GetCurrentCharacterProfessions()
+    local canCheckPerRecipe = (_G.C_TradeSkillUI and type(_G.C_TradeSkillUI.IsRecipeProfessionLearned) == "function") == true
+    if not hasAuthData and not canCheckPerRecipe then
+        return 0
+    end
+
+    local charKey = PF.GetCharacterKey()
+    local charTbl = Profitable_DB.charRecipes[charKey]
+    local pruned = 0
+
+    if type(charTbl) == "table" then
+        local keysToPrune = {}
+        for key, recipe in pairs(charTbl) do
+            if type(recipe) == "table" then
+                if (recipe.recipeId and not recipe.professionId) or INVALID_CRAFTING_PROFESSIONS[recipe.profession or ""] then
+                    PF.RecipeScanner.NormalizeRecipeProfession(recipe)
+                end
+                if not IsRecipeLearnedByCurrentCharacter(recipe, profNames, profNamesLower, skillLineIds, hasAuthData) then
+                    table.insert(keysToPrune, key)
+                end
+            end
+        end
+        for _, key in ipairs(keysToPrune) do
+            charTbl[key] = nil
+            pruned = pruned + 1
+        end
+    end
+
+    local includeAlts = (Profitable_DB.settings and Profitable_DB.settings.includeAllCharRecipes == true)
+    if not includeAlts and (pruned > 0 or hasAuthData) then
+        local function IsCraftOppLearned(opp)
+            if type(opp) ~= "table" or type(opp.recipe) ~= "table" then
+                return true
+            end
+            return IsRecipeLearnedByCurrentCharacter(opp.recipe, profNames, profNamesLower, skillLineIds, hasAuthData)
+        end
+
+        local function FilterPlayList(list)
+            if type(list) ~= "table" then return end
+            local kept = {}
+            for _, opp in ipairs(list) do
+                if IsCraftOppLearned(opp) then
+                    table.insert(kept, opp)
+                end
+            end
+            if #kept ~= #list then
+                return kept
+            end
+            return nil
+        end
+
+        local filteredTop = FilterPlayList(Profitable_DB.lastTopPlays)
+        if filteredTop then
+            Profitable_DB.lastTopPlays = filteredTop
+        end
+        local filteredHM = FilterPlayList(Profitable_DB.lastHonorableMentions)
+        if filteredHM then
+            Profitable_DB.lastHonorableMentions = filteredHM
+        end
+        if Profitable_DB.activePlay and not IsCraftOppLearned(Profitable_DB.activePlay) then
+            Profitable_DB.activePlay = nil
+        end
+    end
+
+    return pruned
+end
+
 function PF.RecipeScanner.RepairSavedRecipeProfessions()
     if type(Profitable_DB) ~= "table" then
         return 0
@@ -277,6 +438,9 @@ function PF.RecipeScanner.RepairSavedRecipeProfessions()
             end
         end
     end
+
+    local pruned = PF.RecipeScanner.PruneUnlearnedCharRecipes()
+    repaired = repaired + pruned
 
     local function RepairOpportunity(opp)
         if type(opp) ~= "table" then return end
@@ -385,6 +549,20 @@ function PF.RecipeScanner.ScanLegacyTradeSkill()
         return 0
     end
 
+    -- Never save another player's linked or guild profession recipes as the character's own
+    if _G.IsTradeSkillLinked then
+        local okL, isLinked = pcall(_G.IsTradeSkillLinked)
+        if okL and isLinked then
+            return 0
+        end
+    end
+    if _G.IsTradeSkillGuild then
+        local okG, isGuild = pcall(_G.IsTradeSkillGuild)
+        if okG and isGuild then
+            return 0
+        end
+    end
+
     local okNum, numSkills = pcall(_G.GetNumTradeSkills)
     if not okNum or type(numSkills) ~= "number" or numSkills <= 0 then
         return 0
@@ -394,8 +572,17 @@ function PF.RecipeScanner.ScanLegacyTradeSkill()
     if _G.GetTradeSkillLine then
         local okLine, lineName = pcall(_G.GetTradeSkillLine)
         if okLine and type(lineName) == "string" and lineName ~= "" and lineName ~= "UNKNOWN" then
-            professionName = lineName
+            professionName = CleanProfessionName(lineName) or lineName
         end
+    end
+    local professionId = PROFESSION_TO_SKILL_LINE_ID[professionName]
+
+    local profNames, profNamesLower, skillLineIds, hasAuthData = GetCurrentCharacterProfessions()
+    if hasAuthData and not IsRecipeLearnedByCurrentCharacter(
+        { profession = professionName, professionId = professionId },
+        profNames, profNamesLower, skillLineIds, hasAuthData
+    ) then
+        return 0
     end
 
     local charRecipes = EnsureCharRecipeTable()
@@ -443,7 +630,7 @@ function PF.RecipeScanner.ScanLegacyTradeSkill()
                     local saved = SaveRecipe(charRecipes, {
                         name = skillName,
                         profession = professionName,
-                        professionId = PROFESSION_TO_SKILL_LINE_ID[professionName],
+                        professionId = professionId,
                         tradeSkillIndex = i,
                         outputItemId = outputItemId,
                         outputLink = itemLink,
@@ -468,6 +655,19 @@ function PF.RecipeScanner.ScanLegacyCraft()
         return 0
     end
 
+    if _G.IsTradeSkillLinked then
+        local okL, isLinked = pcall(_G.IsTradeSkillLinked)
+        if okL and isLinked then
+            return 0
+        end
+    end
+    if _G.IsTradeSkillGuild then
+        local okG, isGuild = pcall(_G.IsTradeSkillGuild)
+        if okG and isGuild then
+            return 0
+        end
+    end
+
     local okNum, numCrafts = pcall(_G.GetNumCrafts)
     if not okNum or type(numCrafts) ~= "number" or numCrafts <= 0 then
         return 0
@@ -477,8 +677,17 @@ function PF.RecipeScanner.ScanLegacyCraft()
     if _G.GetCraftDisplaySkillLine then
         local okLine, lineName = pcall(_G.GetCraftDisplaySkillLine)
         if okLine and type(lineName) == "string" and lineName ~= "" then
-            professionName = lineName
+            professionName = CleanProfessionName(lineName) or lineName
         end
+    end
+    local professionId = PROFESSION_TO_SKILL_LINE_ID[professionName]
+
+    local profNames, profNamesLower, skillLineIds, hasAuthData = GetCurrentCharacterProfessions()
+    if hasAuthData and not IsRecipeLearnedByCurrentCharacter(
+        { profession = professionName, professionId = professionId },
+        profNames, profNamesLower, skillLineIds, hasAuthData
+    ) then
+        return 0
     end
 
     local charRecipes = EnsureCharRecipeTable()
@@ -516,7 +725,7 @@ function PF.RecipeScanner.ScanLegacyCraft()
                     local saved = SaveRecipe(charRecipes, {
                         name = craftName,
                         profession = professionName,
-                        professionId = PROFESSION_TO_SKILL_LINE_ID[professionName],
+                        professionId = professionId,
                         craftIndex = i,
                         outputItemId = outputItemId,
                         outputLink = itemLink,
@@ -541,7 +750,7 @@ function PF.RecipeScanner.ScanModernTradeSkillUI()
         return 0
     end
 
-    -- Never save another player's linked or guild profession recipes as the character's own
+    -- Never save another player's linked, guild, or NPC crafting recipes as the character's own
     if _G.C_TradeSkillUI.IsTradeSkillLinked then
         local okL, isLinked = pcall(_G.C_TradeSkillUI.IsTradeSkillLinked)
         if okL and isLinked then
@@ -551,6 +760,12 @@ function PF.RecipeScanner.ScanModernTradeSkillUI()
     if _G.C_TradeSkillUI.IsTradeSkillGuild then
         local okG, isGuild = pcall(_G.C_TradeSkillUI.IsTradeSkillGuild)
         if okG and isGuild then
+            return 0
+        end
+    end
+    if _G.C_TradeSkillUI.IsNPCCrafting then
+        local okNPC, isNPC = pcall(_G.C_TradeSkillUI.IsNPCCrafting)
+        if okNPC and isNPC then
             return 0
         end
     end
@@ -582,48 +797,62 @@ function PF.RecipeScanner.ScanModernTradeSkillUI()
         end
     end
 
+    local profNames, profNamesLower, skillLineIds, hasAuthData = GetCurrentCharacterProfessions()
     local charRecipes = EnsureCharRecipeTable()
     local scanned = 0
 
     for _, recipeID in ipairs(recipeIDs) do
         local okInfo, info = pcall(_G.C_TradeSkillUI.GetRecipeInfo, recipeID)
         if okInfo and type(info) == "table" and info.learned then
-            local schematic = _G.C_TradeSkillUI.GetRecipeSchematic and _G.C_TradeSkillUI.GetRecipeSchematic(recipeID, false)
-            local outputItemId = (schematic and schematic.outputItemID) or info.itemID
-            if outputItemId and outputItemId > 0 and schematic and type(schematic.reagentSlotSchematics) == "table" then
-                local minMade = schematic.quantityMin or 1
-                local maxMade = schematic.quantityMax or minMade
-                local reagents = {}
-                for _, slot in ipairs(schematic.reagentSlotSchematics) do
-                    local rItemId = slot.reagents and slot.reagents[1] and slot.reagents[1].itemID
-                    local rCount = slot.quantityRequired or 1
-                    if rItemId and rItemId > 0 and rCount > 0 then
-                        local meta = PF.VendorDatabase.GetItemMetadata(rItemId)
-                        table.insert(reagents, {
-                            itemId = rItemId,
-                            name = (meta and meta.name) or string.format("Item #%d", rItemId),
-                            count = rCount,
-                        })
-                    end
+            local profAllowed = true
+            if _G.C_TradeSkillUI.IsRecipeProfessionLearned then
+                local okPL, isPL = pcall(_G.C_TradeSkillUI.IsRecipeProfessionLearned, recipeID)
+                if okPL and isPL == false then
+                    profAllowed = false
                 end
-                if #reagents > 0 then
-                    local recipeName = info.name or string.format("Recipe #%d", recipeID)
-                    local key = tostring(recipeID) .. ":" .. tostring(recipeName)
-                    local existingRecipe = charRecipes[key]
-                    local recipeProf, recipeProfId = ResolveRecipeProfession(recipeID, windowProfName, windowProfId, outputItemId, existingRecipe)
-                    local saved = SaveRecipe(charRecipes, {
-                        recipeId = recipeID,
-                        name = recipeName,
-                        profession = recipeProf,
-                        professionId = recipeProfId,
-                        outputItemId = outputItemId,
-                        minMade = minMade,
-                        maxMade = maxMade,
-                        avgMade = (minMade + maxMade) / 2,
-                        reagents = reagents,
-                    })
-                    if saved then
-                        scanned = scanned + 1
+            end
+
+            if profAllowed then
+                local schematic = _G.C_TradeSkillUI.GetRecipeSchematic and _G.C_TradeSkillUI.GetRecipeSchematic(recipeID, false)
+                local outputItemId = (schematic and schematic.outputItemID) or info.itemID
+                if outputItemId and outputItemId > 0 and schematic and type(schematic.reagentSlotSchematics) == "table" then
+                    local minMade = schematic.quantityMin or 1
+                    local maxMade = schematic.quantityMax or minMade
+                    local reagents = {}
+                    for _, slot in ipairs(schematic.reagentSlotSchematics) do
+                        local rItemId = slot.reagents and slot.reagents[1] and slot.reagents[1].itemID
+                        local rCount = slot.quantityRequired or 1
+                        if rItemId and rItemId > 0 and rCount > 0 then
+                            local meta = PF.VendorDatabase.GetItemMetadata(rItemId)
+                            table.insert(reagents, {
+                                itemId = rItemId,
+                                name = (meta and meta.name) or string.format("Item #%d", rItemId),
+                                count = rCount,
+                            })
+                        end
+                    end
+                    if #reagents > 0 then
+                        local recipeName = info.name or string.format("Recipe #%d", recipeID)
+                        local key = tostring(recipeID) .. ":" .. tostring(recipeName)
+                        local existingRecipe = charRecipes[key]
+                        local recipeProf, recipeProfId = ResolveRecipeProfession(recipeID, windowProfName, windowProfId, outputItemId, existingRecipe)
+                        local candidate = {
+                            recipeId = recipeID,
+                            name = recipeName,
+                            profession = recipeProf,
+                            professionId = recipeProfId,
+                            outputItemId = outputItemId,
+                            minMade = minMade,
+                            maxMade = maxMade,
+                            avgMade = (minMade + maxMade) / 2,
+                            reagents = reagents,
+                        }
+                        if IsRecipeLearnedByCurrentCharacter(candidate, profNames, profNamesLower, skillLineIds, hasAuthData) then
+                            local saved = SaveRecipe(charRecipes, candidate)
+                            if saved then
+                                scanned = scanned + 1
+                            end
+                        end
                     end
                 end
             end
@@ -650,38 +879,49 @@ function PF.RecipeScanner.GetKnownRecipes()
     local list = {}
     local seenByOutput = {}
     local knownProfessions = {}
+    local profNames, profNamesLower, skillLineIds, hasAuthData, skillRanks = GetCurrentCharacterProfessions()
+    local currentCharKey = PF.GetCharacterKey()
 
-    local function AddFromTable(tbl)
+    local function AddFromTable(tbl, enforceCurrentChar)
         if type(tbl) ~= "table" then return end
+        local keysToPrune = nil
         for key, recipe in pairs(tbl) do
-            if type(recipe) == "table" and recipe.outputItemId and not seenByOutput[recipe.outputItemId] then
+            if type(recipe) == "table" and recipe.outputItemId then
                 if (recipe.recipeId and not recipe.professionId) or INVALID_CRAFTING_PROFESSIONS[recipe.profession or ""] then
                     PF.RecipeScanner.NormalizeRecipeProfession(recipe)
                 end
-                seenByOutput[recipe.outputItemId] = true
-                if recipe.profession and not INVALID_CRAFTING_PROFESSIONS[recipe.profession] then
-                    knownProfessions[recipe.profession] = math.max(knownProfessions[recipe.profession] or 0, recipe.skillReq or 1)
+                if enforceCurrentChar and not IsRecipeLearnedByCurrentCharacter(recipe, profNames, profNamesLower, skillLineIds, hasAuthData) then
+                    keysToPrune = keysToPrune or {}
+                    table.insert(keysToPrune, key)
+                elseif not seenByOutput[recipe.outputItemId] then
+                    seenByOutput[recipe.outputItemId] = true
+                    if recipe.profession and not INVALID_CRAFTING_PROFESSIONS[recipe.profession] then
+                        knownProfessions[recipe.profession] = math.max(knownProfessions[recipe.profession] or 0, recipe.skillReq or 1)
+                    end
+                    table.insert(list, recipe)
                 end
-                table.insert(list, recipe)
+            end
+        end
+        if keysToPrune then
+            for _, k in ipairs(keysToPrune) do
+                tbl[k] = nil
             end
         end
     end
 
     if Profitable_DB and Profitable_DB.charRecipes then
         if Profitable_DB.settings and Profitable_DB.settings.includeAllCharRecipes then
-            for _, charTbl in pairs(Profitable_DB.charRecipes) do
-                AddFromTable(charTbl)
+            for cKey, charTbl in pairs(Profitable_DB.charRecipes) do
+                AddFromTable(charTbl, cKey == currentCharKey)
             end
         else
-            local charKey = PF.GetCharacterKey()
-            AddFromTable(Profitable_DB.charRecipes[charKey])
+            AddFromTable(Profitable_DB.charRecipes[currentCharKey], true)
         end
     end
 
     -- Incorporate skill-matched baseline recipes and Trainer/Unlearned recipe recommendations
     local settings = (Profitable_DB and Profitable_DB.settings) or {}
     if settings.includeSkillMatchedBaselineRecipes ~= false and PF.RecipeDatabase and PF.RecipeDatabase.GetAllBaselineRecipes then
-        local skillRanks = PF.RecipeDatabase.GetCharacterSkillRanks()
         for prof, info in pairs(skillRanks) do
             knownProfessions[prof] = math.max(knownProfessions[prof] or 0, info.rank or 0)
         end
@@ -995,9 +1235,15 @@ function PF.RecipeScanner.Init()
         pcall(frame.RegisterEvent, frame, "CRAFT_SHOW")
         pcall(frame.RegisterEvent, frame, "CRAFT_UPDATE")
         pcall(frame.RegisterEvent, frame, "PLAYER_ENTERING_WORLD")
+        pcall(frame.RegisterEvent, frame, "SKILL_LINES_CHANGED")
         frame:SetScript("OnEvent", function(_, event)
-            if event == "PLAYER_ENTERING_WORLD" then
-                PF.RecipeScanner.RepairSavedRecipeProfessions()
+            if event == "PLAYER_ENTERING_WORLD" or event == "SKILL_LINES_CHANGED" then
+                local changed = PF.RecipeScanner.RepairSavedRecipeProfessions()
+                if changed > 0 and PF.SideWindow and PF.SideWindow.frame
+                    and (not PF.SideWindow.frame.IsShown or PF.SideWindow.frame:IsShown())
+                    and PF.SideWindow.Refresh then
+                    PF.SideWindow.Refresh()
+                end
                 return
             end
 

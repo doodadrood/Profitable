@@ -1113,7 +1113,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
     end
 
     -- 2. Scan all known crafting recipes for CRAFT_VENDOR, CRAFT_AH, and CRAFT_DE plays
-    local recipes = PF.RecipeScanner and PF.RecipeScanner.GetKnownRecipes() or {}
+    local recipes = (allowCraftPlays or allowDEPlays) and PF.RecipeScanner and PF.RecipeScanner.GetKnownRecipes() or {}
     for _, recipe in ipairs(recipes) do
         local outId = recipe.outputItemId
         if outId and outId > 0 and type(recipe.reagents) == "table" and #recipe.reagents > 0 then

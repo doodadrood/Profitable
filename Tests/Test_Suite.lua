@@ -268,6 +268,7 @@ Assert(gearOpp ~= nil and gearOpp.quantity == 3 and gearOpp.totalDepositRisk == 
 
 -- 10. Test Baseline Skill-Matched Recipes & Trainer Recommendations
 Mock.skillLines = {
+    { name = "Blacksmithing", isHeader = false, rank = 250, maxRank = 300 },
     { name = "Tailoring", isHeader = false, rank = 240, maxRank = 300 },
 }
 local allKnownAndRecommended = PF.RecipeScanner.GetKnownRecipes()
@@ -278,6 +279,7 @@ for _, rec in ipairs(allKnownAndRecommended) do
     end
 end
 Assert(foundRuneclothBeltTrainer == true, "Recommend Runecloth Belt (Skill 255) for a 240 Tailoring character via Trainer Lookahead")
+Mock.skillLines = {}
 
 -- 11. Test Limited-Supply NPC Vendor Arbitrage Alert (after 5% AH cut)
 Mock.merchantItems = {
@@ -2000,6 +2002,233 @@ do
     _G.AuctionFrame = origAuctionFrame
     _G.GetItemInfo = origGetItemInfo
     _G.C_Item = origCItem
+end
+
+-- 27. Regression Tests: Unlearned Profession Pruning, Linked/NPC Scan Guards, GetProfessions nil-slot Fix, and Strategy-Tagged Verification Progress
+do
+    local origGetProfessions = _G.GetProfessions
+    local origGetProfessionInfo = _G.GetProfessionInfo
+    local origIsLoggedIn = _G.IsLoggedIn
+    local origIsTradeSkillLinked = _G.IsTradeSkillLinked
+    local origIsTradeSkillGuild = _G.IsTradeSkillGuild
+    local origGetNumTradeSkills = _G.GetNumTradeSkills
+    local origTradeSkillLine = Mock.tradeSkillLine
+    local origTradeSkills = Mock.tradeSkills
+    local origSkillLines = Mock.skillLines
+    local origCTradeSkillUI = _G.C_TradeSkillUI
+    local origCAH = _G.C_AuctionHouse
+    local origAHFrame = _G.AuctionHouseFrame
+    local origAuctionFrame = _G.AuctionFrame
+
+    Mock.skillLines = {}
+    _G.IsLoggedIn = function() return true end
+
+    -- 27A. GetCharacterSkillRanks reads ALL 6 GetProfessions() slots even when Archaeology (slot 3) is nil
+    local mockProfTable = {
+        [1] = { "Blacksmithing", 0, 225, 300, 1, 0, 164 },
+        [2] = { "Mining",        0, 250, 300, 1, 0, 186 },
+        [3] = { "Fishing",       0, 150, 300, 1, 0, 356 },
+        [4] = { "Cooking",       0, 200, 300, 1, 0, 185 },
+    }
+    _G.GetProfessions = function() return 1, 2, nil, 3, 4, nil end
+    _G.GetProfessionInfo = function(idx)
+        local row = mockProfTable[idx]
+        if not row then return nil end
+        return row[1], row[2], row[3], row[4], row[5], row[6], row[7]
+    end
+
+    local ranks27, hasAuth27 = _G.PF.RecipeDatabase.GetCharacterSkillRanks()
+    Assert(hasAuth27 == true, "GetCharacterSkillRanks reports authoritative skill data when GetProfessions is present")
+    Assert(ranks27["Blacksmithing"] and ranks27["Blacksmithing"].rank == 225 and ranks27["Blacksmithing"].skillLine == 164, "Detect Blacksmithing (225 / 164) from GetProfessions")
+    Assert(ranks27["Mining"] and ranks27["Mining"].rank == 250 and ranks27["Mining"].skillLine == 186, "Detect Mining (250 / 186) from GetProfessions")
+    Assert(ranks27["Cooking"] and ranks27["Cooking"].rank == 200 and ranks27["Cooking"].skillLine == 185, "Detect Cooking (slot 5) even when Archaeology (slot 3) is nil")
+    Assert(ranks27["Tailoring"] == nil, "Blacksmith/Miner does NOT detect Tailoring")
+
+    -- 27B. Stale/dropped/linked Tailoring recipes in current char's charRecipes are pruned, while alts' recipes stay intact
+    local charKey27 = _G.PF.GetCharacterKey()
+    local altKey27 = "TailorAlt-Forever"
+    _G.GetNumTradeSkills = function() return 0 end
+    _G.C_TradeSkillUI = nil
+    _G.Profitable_DB.settings.includeAllCharRecipes = false
+    _G.Profitable_DB.settings.includeSkillMatchedBaselineRecipes = true
+    _G.Profitable_DB.charRecipes = {
+        [charKey27] = {
+            ["3840:Runecloth Belt"] = {
+                recipeId = 18401, name = "Runecloth Belt", profession = "Tailoring", professionId = 197,
+                outputItemId = 13856, avgMade = 1,
+                reagents = { { itemId = 14048, name = "Bolt of Runecloth", count = 2 }, { itemId = 14341, name = "Rune Thread", count = 1 } },
+            },
+            ["3841:Bolt of Mageweave"] = {
+                recipeId = 12046, name = "Bolt of Mageweave", profession = "Tailoring", professionId = 197,
+                outputItemId = 4339, avgMade = 1,
+                reagents = { { itemId = 4338, name = "Mageweave Cloth", count = 5 } },
+            },
+            ["9920:Solid Grinding Stone"] = {
+                recipeId = 9920, name = "Solid Grinding Stone", profession = "Blacksmithing", professionId = 164,
+                outputItemId = 7966, avgMade = 1,
+                reagents = { { itemId = 7912, name = "Solid Stone", count = 4 } },
+            },
+        },
+        [altKey27] = {
+            ["18401:Runecloth Belt"] = {
+                recipeId = 18401, name = "Runecloth Belt", profession = "Tailoring", professionId = 197,
+                outputItemId = 13856, avgMade = 1,
+                reagents = { { itemId = 14048, name = "Bolt of Runecloth", count = 2 }, { itemId = 14341, name = "Rune Thread", count = 1 } },
+            },
+        },
+    }
+    _G.Profitable_DB.lastTopPlays = {
+        { id = "CRAFT_AH:13856", actionType = "CRAFT_AH", itemId = 13856, recipe = _G.Profitable_DB.charRecipes[charKey27]["3840:Runecloth Belt"] },
+        { id = "VENDOR:2447", actionType = "VENDOR", itemId = 2447 },
+    }
+    _G.Profitable_DB.activePlay = _G.Profitable_DB.lastTopPlays[1]
+
+    local pruned27 = _G.PF.RecipeScanner.PruneUnlearnedCharRecipes()
+    Assert(pruned27 == 2, "PruneUnlearnedCharRecipes removes both stale Tailoring recipes from Blacksmith/Miner")
+    Assert(_G.Profitable_DB.charRecipes[charKey27]["3840:Runecloth Belt"] == nil and _G.Profitable_DB.charRecipes[charKey27]["3841:Bolt of Mageweave"] == nil, "Stale Tailoring recipes are purged from current character's SavedVariables")
+    Assert(_G.Profitable_DB.charRecipes[charKey27]["9920:Solid Grinding Stone"] ~= nil, "Learned Blacksmithing recipe is preserved")
+    Assert(_G.Profitable_DB.charRecipes[altKey27]["18401:Runecloth Belt"] ~= nil, "Other characters' (alt) Tailoring recipes are NEVER pruned")
+    Assert(#_G.Profitable_DB.lastTopPlays == 1 and _G.Profitable_DB.lastTopPlays[1].id == "VENDOR:2447", "Cached Tailoring craft play is cleared from lastTopPlays while Vendor play remains")
+    Assert(_G.Profitable_DB.activePlay == nil, "Cached unlearned Tailoring activePlay is cleared")
+
+    -- Verify GetKnownRecipes returns ZERO Tailoring recipes and ZERO Tailoring intermediate bolt conversions
+    local known27 = _G.PF.RecipeScanner.GetKnownRecipes()
+    local foundAnyTailoring27 = false
+    local foundAnyBS27 = false
+    for _, rec in ipairs(known27) do
+        if rec.profession == "Tailoring" then foundAnyTailoring27 = true end
+        if rec.profession == "Blacksmithing" then foundAnyBS27 = true end
+    end
+    Assert(foundAnyTailoring27 == false, "GetKnownRecipes returns ZERO Tailoring recipes (saved or baseline/trainer) for a Blacksmith/Miner")
+    Assert(foundAnyBS27 == true, "GetKnownRecipes still returns Blacksmithing recipes for a Blacksmith/Miner")
+    Assert(_G.PF.RecipeScanner.GetIntermediateRecipeForItem(4339) == nil, "GetIntermediateRecipeForItem(Bolt of Mageweave) returns nil for a Blacksmith/Miner")
+
+    -- 27C. SKILL_LINES_CHANGED automatically prunes recipes if a character unlearns a profession
+    _G.Profitable_DB.charRecipes[charKey27]["3840:Runecloth Belt"] = {
+        recipeId = 18401, name = "Runecloth Belt", profession = "Tailoring", professionId = 197,
+        outputItemId = 13856, avgMade = 1,
+        reagents = { { itemId = 14048, name = "Bolt of Runecloth", count = 2 } },
+    }
+    _G.PF.RecipeScanner.frame:Trigger("SKILL_LINES_CHANGED")
+    Assert(_G.Profitable_DB.charRecipes[charKey27]["3840:Runecloth Belt"] == nil, "SKILL_LINES_CHANGED prunes unlearned Tailoring recipes automatically")
+
+    -- 27D. Legacy ScanLegacyTradeSkill blocks linked profession windows and unlearned Tailoring windows
+    _G.GetNumTradeSkills = origGetNumTradeSkills
+    Mock.tradeSkillLine = "Tailoring"
+    Mock.tradeSkills = {
+        { name = "Runecloth Belt", outputItemId = 13856, reagents = { { itemId = 14048, name = "Bolt of Runecloth", count = 2 } } },
+    }
+    _G.IsTradeSkillLinked = function() return true end
+    Assert(_G.PF.RecipeScanner.ScanLegacyTradeSkill() == 0, "ScanLegacyTradeSkill ignores linked profession windows (IsTradeSkillLinked == true)")
+    _G.IsTradeSkillLinked = function() return false end
+    Assert(_G.PF.RecipeScanner.ScanLegacyTradeSkill() == 0, "ScanLegacyTradeSkill rejects unlearned Tailoring window on Blacksmith/Miner")
+    Assert(_G.Profitable_DB.charRecipes[charKey27]["13856:Runecloth Belt"] == nil, "Rejected Tailoring recipe is never saved to charRecipes")
+
+    -- 27E. Modern ScanModernTradeSkillUI blocks IsNPCCrafting, IsRecipeProfessionLearned == false, and unlearned Tailoring
+    _G.GetNumTradeSkills = function() return 0 end
+    local npcCrafting27 = true
+    local recipeProfLearned27 = true
+    _G.C_TradeSkillUI = {
+        IsTradeSkillLinked = function() return false end,
+        IsTradeSkillGuild = function() return false end,
+        IsNPCCrafting = function() return npcCrafting27 end,
+        IsTradeSkillReady = function() return true end,
+        IsRecipeProfessionLearned = function() return recipeProfLearned27 end,
+        GetAllRecipeIDs = function() return { 18401 } end,
+        GetBaseProfessionInfo = function() return { professionID = 197, professionName = "Tailoring" } end,
+        GetProfessionInfoByRecipeID = function() return { professionID = 197, professionName = "Tailoring", parentProfessionID = 197, parentProfessionName = "Tailoring" } end,
+        GetRecipeInfo = function() return { recipeID = 18401, name = "Runecloth Belt", learned = true, itemID = 13856 } end,
+        GetRecipeSchematic = function()
+            return {
+                outputItemID = 13856, quantityMin = 1, quantityMax = 1,
+                reagentSlotSchematics = { { quantityRequired = 2, reagents = { { itemID = 14048 } } } },
+            }
+        end,
+    }
+    Assert(_G.PF.RecipeScanner.ScanModernTradeSkillUI() == 0, "ScanModernTradeSkillUI ignores NPC crafting windows (IsNPCCrafting == true)")
+    npcCrafting27 = false
+    recipeProfLearned27 = false
+    Assert(_G.PF.RecipeScanner.ScanModernTradeSkillUI() == 0, "ScanModernTradeSkillUI skips recipes where IsRecipeProfessionLearned == false")
+    recipeProfLearned27 = true
+    Assert(_G.PF.RecipeScanner.ScanModernTradeSkillUI() == 0, "ScanModernTradeSkillUI rejects Tailoring recipes not learned by Blacksmith/Miner")
+
+    -- 27F. Early pre-login (IsLoggedIn == false) with empty GetProfessions does NOT prematurely wipe charRecipes; post-login 0-prof char DOES prune
+    _G.C_TradeSkillUI = nil
+    _G.GetProfessions = function() return nil, nil, nil, nil, nil, nil end
+    _G.IsLoggedIn = function() return false end
+    _G.Profitable_DB.charRecipes[charKey27] = {
+        ["9920:Solid Grinding Stone"] = {
+            recipeId = 9920, name = "Solid Grinding Stone", profession = "Blacksmithing", professionId = 164,
+            outputItemId = 7966, avgMade = 1,
+            reagents = { { itemId = 7912, name = "Solid Stone", count = 4 } },
+        },
+    }
+    Assert(_G.PF.RecipeScanner.PruneUnlearnedCharRecipes() == 0, "Pre-login (IsLoggedIn == false) does NOT prematurely prune saved recipes")
+    Assert(_G.Profitable_DB.charRecipes[charKey27]["9920:Solid Grinding Stone"] ~= nil, "Saved Blacksmithing recipe survives pre-login check")
+    _G.IsLoggedIn = function() return true end
+    Assert(_G.PF.RecipeScanner.PruneUnlearnedCharRecipes() == 1, "Logged-in character with 0 professions prunes stale saved recipes")
+
+    -- 27G. Verification status bar tags queued items with their strategy ([Vendor], [DE], [Craft])
+    _G.GetProfessions = function() return 1, 2, nil, 3, 4, nil end
+    _G.Profitable_DB.settings.assumeCanDisenchant = false
+    _G.Profitable_DB.settings.showCraftPlays = false
+    _G.Profitable_DB.settings.showVendorPlays = true
+    _G.Profitable_DB.settings.includeSkillMatchedBaselineRecipes = false
+    _G.Profitable_DB.itemCache[7084] = { name = "Pattern: Green Silk Armor", quality = 2, itemLevel = 33, classID = 9, vendorSell = 1500 }
+    local now27 = math.floor(Mock.currentTime)
+    _G.PCF_DB.prices = {
+        [7084] = { minBuyout = 200, count = 2, lastUpdated = now27, source = "Scan" },
+    }
+    _G.PCF_DB.lastFullScan = now27
+    _G.Profitable_DB.orderBookCache = {}
+    _G.Profitable_MarketFeed = nil
+    _G.AuctionFrame = nil
+    _G.AuctionHouseFrame = _G.CreateFrame("Frame", "AuctionHouseFrame", _G.UIParent)
+    _G.AuctionHouseFrame:Show()
+    local capturedStatus27 = nil
+    _G.C_AuctionHouse = {
+        MakeItemKey = function(id) return { itemID = id, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 } end,
+        GetItemKeyInfo = function(key) return { itemID = key.itemID, isCommodity = false } end,
+        IsThrottledMessageSystemReady = function() return true end,
+        SendSearchQuery = function()
+            capturedStatus27 = _G.PF.SideWindow.frame and _G.PF.SideWindow.frame.statusText and _G.PF.SideWindow.frame.statusText:GetText()
+        end,
+        GetNumItemSearchResults = function() return 0 end,
+    }
+    Mock.timers = {}
+    _G.PF.SideWindow.RunSearch()
+    -- Flush only the first verification step timer so SendSearchQuery runs and captures in-flight statusText
+    if #Mock.timers > 0 then
+        local firstTimer = table.remove(Mock.timers, 1)
+        firstTimer.callback()
+    end
+    Assert(
+        type(capturedStatus27) == "string" and capturedStatus27:find("%[Vendor%]") ~= nil and capturedStatus27:find("Pattern: Green Silk Armor") ~= nil,
+        "SideWindow verification status tags Pattern Vendor flips with '[Vendor]: Pattern: Green Silk Armor'"
+    )
+    _G.PF.AHVerifier.Stop("TEST_DONE")
+    _G.PF.SideWindow.UpdateProgress(2, 5, { name = "Azure Silk Vest", strategyTag = "DE" })
+    Assert(_G.PF.SideWindow.frame.statusText:GetText() == "2/5 [DE]: Azure Silk Vest", "SideWindow.UpdateProgress formats [DE] tag cleanly")
+    _G.PF.SideWindow.UpdateProgress(3, 5, { name = "Mithril Ore", strategyTag = "Craft" })
+    Assert(_G.PF.SideWindow.frame.statusText:GetText() == "3/5 [Craft]: Mithril Ore", "SideWindow.UpdateProgress formats [Craft] tag cleanly")
+
+    -- Restore globals
+    _G.GetProfessions = origGetProfessions
+    _G.GetProfessionInfo = origGetProfessionInfo
+    _G.IsLoggedIn = origIsLoggedIn
+    _G.IsTradeSkillLinked = origIsTradeSkillLinked
+    _G.IsTradeSkillGuild = origIsTradeSkillGuild
+    _G.GetNumTradeSkills = origGetNumTradeSkills
+    Mock.tradeSkillLine = origTradeSkillLine
+    Mock.tradeSkills = origTradeSkills
+    Mock.skillLines = origSkillLines
+    _G.C_TradeSkillUI = origCTradeSkillUI
+    _G.C_AuctionHouse = origCAH
+    _G.AuctionHouseFrame = origAHFrame
+    _G.AuctionFrame = origAuctionFrame
+    _G.Profitable_DB.settings.assumeCanDisenchant = true
+    _G.Profitable_DB.settings.showCraftPlays = true
+    _G.Profitable_DB.settings.showVendorPlays = true
 end
 
 print("\nAll Profitable test assertions passed successfully!")

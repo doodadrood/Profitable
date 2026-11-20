@@ -562,41 +562,90 @@ function PF.RecipeDatabase.GetAllBaselineRecipes()
     return BASELINE_RECIPES
 end
 
+local SKILL_LINE_ID_TO_NAME = {
+    [129] = "First Aid",
+    [164] = "Blacksmithing",
+    [165] = "Leatherworking",
+    [171] = "Alchemy",
+    [182] = "Herbalism",
+    [185] = "Cooking",
+    [186] = "Mining",
+    [197] = "Tailoring",
+    [202] = "Engineering",
+    [333] = "Enchanting",
+    [356] = "Fishing",
+    [393] = "Skinning",
+    [755] = "Jewelcrafting",
+    [773] = "Inscription",
+}
+
 function PF.RecipeDatabase.GetCharacterSkillRanks()
     local skills = {}
+    local hasSkillData = false
+
     if _G.GetNumSkillLines and _G.GetSkillLineInfo then
         local okNum, numLines = pcall(_G.GetNumSkillLines)
         if okNum and type(numLines) == "number" and numLines > 0 then
+            hasSkillData = true
             for i = 1, numLines do
                 local okLine, skillName, isHeader, _, skillRank, _, _, skillMaxRank = pcall(_G.GetSkillLineInfo, i)
                 if okLine and not isHeader and type(skillName) == "string" and type(skillRank) == "number" and skillRank > 0 then
-                    skills[skillName] = {
-                        rank = skillRank,
-                        maxRank = skillMaxRank or 300,
-                    }
-                end
-            end
-        end
-    end
-    if _G.GetProfessions and _G.GetProfessionInfo then
-        local okProfs, p1, p2, arch, fish, cook = pcall(_G.GetProfessions)
-        if okProfs then
-            local indices = { p1, p2, arch, fish, cook }
-            for _, idx in ipairs(indices) do
-                if type(idx) == "number" then
-                    local okInfo, profName, _, skillRank, skillMaxRank = pcall(_G.GetProfessionInfo, idx)
-                    if okInfo and type(profName) == "string" and profName ~= "" and type(skillRank) == "number" and skillRank > 0 then
-                        local existing = skills[profName]
-                        if not existing or skillRank > (existing.rank or 0) then
-                            skills[profName] = {
-                                rank = skillRank,
-                                maxRank = skillMaxRank or 300,
-                            }
-                        end
+                    local canonical = (skillName == "Smelting") and "Mining" or skillName
+                    local existing = skills[canonical]
+                    if not existing or skillRank > (existing.rank or 0) then
+                        skills[canonical] = {
+                            rank = skillRank,
+                            maxRank = skillMaxRank or 300,
+                            displayName = skillName,
+                        }
                     end
                 end
             end
         end
     end
-    return skills
+
+    if _G.GetProfessions and _G.GetProfessionInfo then
+        local okProfs, p1, p2, arch, fish, cook, firstAid = pcall(_G.GetProfessions)
+        if okProfs then
+            local foundAny = false
+            -- Use a fixed numeric loop (1..6) instead of ipairs so nil slots
+            -- (e.g. missing Archaeology or a single primary profession) never cut off later slots.
+            local slots = { p1, p2, arch, fish, cook, firstAid }
+            for slotIdx = 1, 6 do
+                local idx = slots[slotIdx]
+                if type(idx) == "number" then
+                    local okInfo, profName, _, skillRank, skillMaxRank, _, _, skillLine = pcall(_G.GetProfessionInfo, idx)
+                    if okInfo and type(skillRank) == "number" and skillRank >= 0 then
+                        local canonical = (type(skillLine) == "number" and SKILL_LINE_ID_TO_NAME[skillLine])
+                            or (type(profName) == "string" and profName ~= "" and profName)
+                            or nil
+                        if canonical == "Smelting" then
+                            canonical = "Mining"
+                        end
+                        if canonical and canonical ~= "" then
+                            foundAny = true
+                            local effectiveRank = math.max(1, skillRank)
+                            local existing = skills[canonical]
+                            if not existing or effectiveRank > (existing.rank or 0) then
+                                skills[canonical] = {
+                                    rank = effectiveRank,
+                                    maxRank = skillMaxRank or 300,
+                                    skillLine = (type(skillLine) == "number" and skillLine > 0) and skillLine or (existing and existing.skillLine),
+                                    displayName = (type(profName) == "string" and profName ~= "") and profName or canonical,
+                                }
+                            elseif type(skillLine) == "number" and skillLine > 0 and not existing.skillLine then
+                                existing.skillLine = skillLine
+                            end
+                        end
+                    end
+                end
+            end
+            local loggedIn = (not _G.IsLoggedIn) or (_G.IsLoggedIn() == true)
+            if foundAny or loggedIn then
+                hasSkillData = true
+            end
+        end
+    end
+
+    return skills, hasSkillData
 end

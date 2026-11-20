@@ -683,6 +683,8 @@ local function EnsureSideWindow()
     local statusText = statusBar.CreateFontString and statusBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     if statusText then
         if statusText.SetPoint then statusText:SetPoint("CENTER", statusBar, "CENTER", 0, 0) end
+        if statusText.SetWidth then statusText:SetWidth(160) end
+        if statusText.SetWordWrap then pcall(statusText.SetWordWrap, statusText, false) end
         if statusText.SetText then statusText:SetText("Ready") end
     end
 
@@ -796,7 +798,12 @@ function PF.SideWindow.UpdateProgress(currentIdx, totalCount, targetItem)
     end
     if sideFrame.statusText then
         local name = (targetItem and targetItem.name) or "AH"
-        sideFrame.statusText:SetText(string.format("Verifying %d/%d: %s", currentIdx or 0, totalCount or 0, name))
+        local tag = targetItem and targetItem.strategyTag
+        if tag and tag ~= "" then
+            sideFrame.statusText:SetText(string.format("%d/%d [%s]: %s", currentIdx or 0, totalCount or 0, tag, name))
+        else
+            sideFrame.statusText:SetText(string.format("Verifying %d/%d: %s", currentIdx or 0, totalCount or 0, name))
+        end
     end
 end
 

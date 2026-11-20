@@ -319,7 +319,15 @@ local activeQueuedIds = {}
 local activeForceLiveVerify = false
 local activeFeedFreshWindow = false
 
-local function EnqueueVerificationItem(itemId, itemName)
+local ACTION_VERIFY_TAGS = {
+    VENDOR       = "Vendor",
+    BUY_DE       = "DE",
+    CRAFT_VENDOR = "Craft",
+    CRAFT_AH     = "Craft",
+    CRAFT_DE     = "Craft DE",
+}
+
+local function EnqueueVerificationItem(itemId, itemName, actionType)
     if not itemId or itemId <= 0 or activeQueuedIds[itemId] then return end
     if #verifyQueue >= MAX_VERIFY_QUEUE then return end
     if PF.VendorDatabase.IsVendorReagent(itemId) then return end
@@ -342,30 +350,33 @@ local function EnqueueVerificationItem(itemId, itemName)
     table.insert(verifyQueue, {
         itemId = itemId,
         name = resolvedName,
+        actionType = actionType,
+        strategyTag = actionType and ACTION_VERIFY_TAGS[actionType] or nil,
     })
 end
 
 local function EnqueuePlayList(list)
     if type(list) ~= "table" then return end
     for _, opp in ipairs(list) do
+        local aType = opp.actionType
         if opp.shoppingList then
             for _, shop in ipairs(opp.shoppingList) do
                 if shop.source == "AH" then
-                    EnqueueVerificationItem(shop.itemId, shop.name)
+                    EnqueueVerificationItem(shop.itemId, shop.name, aType)
                 end
             end
         end
-        if opp.actionType == "CRAFT_AH" then
-            EnqueueVerificationItem(opp.itemId, opp.itemName)
-        elseif opp.actionType == "BUY_DE" or opp.actionType == "CRAFT_DE" then
+        if aType == "CRAFT_AH" then
+            EnqueueVerificationItem(opp.itemId, opp.itemName, aType)
+        elseif aType == "BUY_DE" or aType == "CRAFT_DE" then
             if opp.targetMatId then
-                EnqueueVerificationItem(opp.targetMatId, opp.targetMatName)
+                EnqueueVerificationItem(opp.targetMatId, opp.targetMatName, aType)
             end
             if opp.deBreakdown and type(opp.deBreakdown.drops) == "table" then
                 for _, d in ipairs(opp.deBreakdown.drops) do
                     local matId = d.sellItemId or d.itemId
                     if matId then
-                        EnqueueVerificationItem(matId, d.name)
+                        EnqueueVerificationItem(matId, d.name, aType)
                     end
                 end
             end
