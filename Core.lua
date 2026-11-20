@@ -107,6 +107,23 @@ local function RegisterSlashCommands()
             if PF.SideWindow and PF.SideWindow.ToggleSettingsWindow then
                 PF.SideWindow.ToggleSettingsWindow()
             end
+        elseif cmd == "budget" then
+            if arg == nil or arg == "" then
+                local eff, isCapped, playerGold, customCap = PF.GetEffectiveBudget()
+                if isCapped then
+                    print(string.format(
+                        "|cff00ff88[Profitable]|r Budget Cap: %s (Effective: %s, Wallet: %s). Use '/pf budget <amount>' or '/pf budget auto'.",
+                        PF.Formatter.FormatMoney(customCap), PF.Formatter.FormatMoney(eff), PF.Formatter.FormatMoney(playerGold)
+                    ))
+                else
+                    print(string.format(
+                        "|cff00ff88[Profitable]|r Budget: All Gold (%s). Use '/pf budget 10g' to cap or '/pf budget auto' to reset.",
+                        PF.Formatter.FormatMoney(playerGold)
+                    ))
+                end
+            elseif PF.SideWindow and PF.SideWindow.SetCustomBudget then
+                PF.SideWindow.SetCustomBudget(arg)
+            end
         else
             print("|cff00ff88Profitable Commands:|r")
             print("  /pf          - Toggle the Profitable AH side window")
@@ -114,6 +131,7 @@ local function RegisterSlashCommands()
             print("  /pf scan     - Start an AH price scan (when at the AH) or calculate plays")
             print("  /pf detail N - Open the breakdown & shopping tracker for play #1-#5")
             print("  /pf options  - Open the Profitable Filter & Play Options window")
+            print("  /pf budget X - Set max spending budget (e.g. '/pf budget 10g' or '/pf budget auto')")
             print("  /pf buyout   - Toggle Buyout-Only mode (excludes bid-only auctions; Default: ON)")
             print("  /pf de       - Toggle Disenchant plays on or off (Default: ON)")
             print("  /pf alts     - Toggle using known recipes across all alts vs current character")

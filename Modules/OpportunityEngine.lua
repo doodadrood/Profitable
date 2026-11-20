@@ -1393,7 +1393,7 @@ end
 function PF.OpportunityEngine.FindTopOpportunities(budgetOverride, customOrderBooks, limitOverride)
     local budget = (type(budgetOverride) == "number" and budgetOverride >= 0)
         and budgetOverride
-        or PF.Formatter.GetPlayerGold()
+        or ((PF.GetEffectiveBudget and PF.GetEffectiveBudget()) or PF.Formatter.GetPlayerGold())
     local topLimit = limitOverride or ((Profitable_DB and Profitable_DB.settings and Profitable_DB.settings.topCount) or 5)
 
     local candidates = PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
@@ -1510,7 +1510,7 @@ function PF.OpportunityEngine.ReevaluateSingleOpportunity(opp, budgetOverride)
     local ahCut = (PF.GetEffectiveAHCutRate and PF.GetEffectiveAHCutRate()) or settings.ahCutRate or 0.05
     local budget = (type(budgetOverride) == "number" and budgetOverride >= 0)
         and budgetOverride
-        or PF.Formatter.GetPlayerGold()
+        or ((PF.GetEffectiveBudget and PF.GetEffectiveBudget()) or PF.Formatter.GetPlayerGold())
     local deductDeposit = (settings.deductExpectedDeposit ~= false)
 
     local resolveExitUnit = function(id)

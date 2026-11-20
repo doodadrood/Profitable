@@ -426,6 +426,66 @@ function PF.SideWindow.RefreshFilterControls()
             end
         end
     end
+
+    if settingsFrame and settingsFrame.budgetTitleText then
+        local effectiveBudget, isCapped, playerGold, customCap = PF.GetEffectiveBudget()
+        if isCapped then
+            local extraNote = (playerGold < customCap)
+                and string.format(" |cffffcc00(using %s — wallet limit)|r", PF.Formatter.FormatMoneyShort(effectiveBudget))
+                or string.format(" |cffaaaaaa(Wallet: %s)|r", PF.Formatter.FormatMoneyShort(playerGold))
+            settingsFrame.budgetTitleText:SetText(string.format(
+                "Max Spending Budget: |cff00ff88%s Cap|r%s",
+                PF.Formatter.FormatMoneyShort(customCap),
+                extraNote
+            ))
+        else
+            settingsFrame.budgetTitleText:SetText(string.format(
+                "Max Spending Budget: |cffffd100All Gold (%s)|r",
+                PF.Formatter.FormatMoneyShort(playerGold)
+            ))
+        end
+        if settingsFrame.budgetInput and not (settingsFrame.budgetInput.HasFocus and settingsFrame.budgetInput:HasFocus()) then
+            settingsFrame.budgetInput:SetText(isCapped and PF.Formatter.FormatMoneyShort(customCap) or "")
+        end
+    end
+end
+
+function PF.SideWindow.SetCustomBudget(inputValue, quiet)
+    local copper = PF.ParseGoldToCopper(inputValue)
+    if copper == nil then
+        if not quiet then
+            print("|cffff5555[Profitable]|r Invalid budget. Enter gold like '10', '10g', '10g 50s', or 'auto' for all gold.")
+        end
+        return false, nil
+    end
+
+    Profitable_DB = Profitable_DB or {}
+    Profitable_DB.settings = Profitable_DB.settings or {}
+    Profitable_DB.settings.customBudgetCopper = copper
+    PF.SideWindow.ApplyFilterChange()
+
+    if not quiet then
+        if copper > 0 then
+            local eff, _, playerGold = PF.GetEffectiveBudget()
+            if playerGold < copper then
+                print(string.format(
+                    "|cff00ff88[Profitable]|r Spending budget cap set to %s (effective: %s based on current wallet).",
+                    PF.Formatter.FormatMoney(copper), PF.Formatter.FormatMoney(eff)
+                ))
+            else
+                print(string.format(
+                    "|cff00ff88[Profitable]|r Spending budget cap set to %s (Wallet: %s).",
+                    PF.Formatter.FormatMoney(copper), PF.Formatter.FormatMoney(playerGold)
+                ))
+            end
+        else
+            print(string.format(
+                "|cff00ff88[Profitable]|r Spending budget reset to All Gold (%s).",
+                PF.Formatter.FormatMoney(PF.Formatter.GetPlayerGold())
+            ))
+        end
+    end
+    return true, copper
 end
 
 function PF.SideWindow.ApplyFilterChange()
@@ -457,7 +517,7 @@ local function EnsureSettingsWindow()
     end
 
     settingsFrame = CreateFrame("Frame", "PF_SettingsWindow", _G.UIParent)
-    if settingsFrame.SetSize then settingsFrame:SetSize(410, 385) end
+    if settingsFrame.SetSize then settingsFrame:SetSize(410, 456) end
     if settingsFrame.SetPoint then settingsFrame:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 20) end
     if settingsFrame.SetFrameStrata then settingsFrame:SetFrameStrata("MEDIUM") end
     if settingsFrame.SetToplevel then settingsFrame:SetToplevel(true) end
@@ -522,6 +582,70 @@ local function EnsureSettingsWindow()
         settingsCheckRows[opt.key] = row
     end
 
+    -- Max Spending Budget Cap Section (Defaults to full character gold when blank/0)
+    local budgetYOff = -56 - (#SETTINGS_OPTIONS * 40) - 4
+    local budgetCard = CreateFrame("Frame", "PF_SettingsBudgetCard", settingsFrame)
+    if budgetCard.SetSize then budgetCard:SetSize(382, 68) end
+    if budgetCard.SetPoint then budgetCard:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", 14, budgetYOff) end
+    SetBackdropSafe(budgetCard, 0.10, 0.13, 0.18, 0.94)
+
+    local budgetTitleText = budgetCard.CreateFontString and budgetCard:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    if budgetTitleText then
+        if budgetTitleText.SetPoint then budgetTitleText:SetPoint("TOPLEFT", budgetCard, "TOPLEFT", 8, -6) end
+        if budgetTitleText.SetWidth then budgetTitleText:SetWidth(366) end
+        if budgetTitleText.SetJustifyH then budgetTitleText:SetJustifyH("LEFT") end
+    end
+
+    local budgetDescText = budgetCard.CreateFontString and budgetCard:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    if budgetDescText then
+        if budgetDescText.SetPoint then budgetDescText:SetPoint("TOPLEFT", budgetTitleText, "BOTTOMLEFT", 0, -2) end
+        if budgetDescText.SetWidth then budgetDescText:SetWidth(366) end
+        if budgetDescText.SetJustifyH then budgetDescText:SetJustifyH("LEFT") end
+        if budgetDescText.SetText then
+            budgetDescText:SetText("|cffaaaaaaLimit gold spent per play (e.g. 10, 10g 50s, or blank for All Gold):|r")
+        end
+    end
+
+    local budgetInput = CreateFrame("EditBox", "PF_SettingsBudgetInput", budgetCard, "InputBoxTemplate")
+    if budgetInput.SetSize then budgetInput:SetSize(130, 20) end
+    if budgetInput.SetPoint then budgetInput:SetPoint("BOTTOMLEFT", budgetCard, "BOTTOMLEFT", 14, 8) end
+    if budgetInput.SetAutoFocus then pcall(budgetInput.SetAutoFocus, budgetInput, false) end
+    if budgetInput.SetMaxLetters then pcall(budgetInput.SetMaxLetters, budgetInput, 20) end
+
+    local function CommitBudgetInput()
+        local raw = (budgetInput.GetText and budgetInput:GetText()) or ""
+        if budgetInput.ClearFocus then pcall(budgetInput.ClearFocus, budgetInput) end
+        PF.SideWindow.SetCustomBudget(raw)
+    end
+
+    budgetInput:SetScript("OnEnterPressed", CommitBudgetInput)
+    budgetInput:SetScript("OnEscapePressed", function(self)
+        if self.ClearFocus then pcall(self.ClearFocus, self) end
+        PF.SideWindow.RefreshFilterControls()
+    end)
+
+    local budgetApplyBtn = CreateFrame("Button", "PF_SettingsBudgetApplyButton", budgetCard, "UIPanelButtonTemplate")
+    if budgetApplyBtn.SetSize then budgetApplyBtn:SetSize(74, 22) end
+    if budgetApplyBtn.SetPoint then budgetApplyBtn:SetPoint("LEFT", budgetInput, "RIGHT", 10, 0) end
+    if budgetApplyBtn.SetText then budgetApplyBtn:SetText("Apply") end
+    budgetApplyBtn:SetScript("OnClick", CommitBudgetInput)
+
+    local budgetAutoBtn = CreateFrame("Button", "PF_SettingsBudgetAutoButton", budgetCard, "UIPanelButtonTemplate")
+    if budgetAutoBtn.SetSize then budgetAutoBtn:SetSize(112, 22) end
+    if budgetAutoBtn.SetPoint then budgetAutoBtn:SetPoint("LEFT", budgetApplyBtn, "RIGHT", 8, 0) end
+    if budgetAutoBtn.SetText then budgetAutoBtn:SetText("Use All Gold") end
+    budgetAutoBtn:SetScript("OnClick", function()
+        if budgetInput.ClearFocus then pcall(budgetInput.ClearFocus, budgetInput) end
+        if budgetInput.SetText then budgetInput:SetText("") end
+        PF.SideWindow.SetCustomBudget(0)
+    end)
+
+    settingsFrame.budgetCard = budgetCard
+    settingsFrame.budgetTitleText = budgetTitleText
+    settingsFrame.budgetInput = budgetInput
+    settingsFrame.budgetApplyBtn = budgetApplyBtn
+    settingsFrame.budgetAutoBtn = budgetAutoBtn
+
     local resetBtn = CreateFrame("Button", "PF_SettingsResetButton", settingsFrame, "UIPanelButtonTemplate")
     if resetBtn.SetSize then resetBtn:SetSize(160, 24) end
     if resetBtn.SetPoint then resetBtn:SetPoint("BOTTOMLEFT", settingsFrame, "BOTTOMLEFT", 14, 12) end
@@ -532,6 +656,9 @@ local function EnsureSettingsWindow()
         for _, opt in ipairs(SETTINGS_OPTIONS) do
             Profitable_DB.settings[opt.key] = opt.defaultVal
         end
+        Profitable_DB.settings.customBudgetCopper = 0
+        if budgetInput.ClearFocus then pcall(budgetInput.ClearFocus, budgetInput) end
+        if budgetInput.SetText then budgetInput:SetText("") end
         PF.SideWindow.ApplyFilterChange()
     end)
 
@@ -810,7 +937,7 @@ end
 function PF.SideWindow.RefreshRows()
     if not sideFrame then return end
 
-    local gold = PF.Formatter.GetPlayerGold()
+    local effectiveBudget, isCapped = PF.GetEffectiveBudget()
     local recipes = PF.RecipeScanner.GetKnownRecipes()
     local dataStatus, dataInfo = "FRESH", { itemCount = 0, pcfItems = 0, ageText = "0m" }
     if PF.GetAHDataStatus then
@@ -834,9 +961,12 @@ function PF.SideWindow.RefreshRows()
         else
             itemsLabel = string.format("|cff00ccff%d|r", pcfItems)
         end
+        local budgetLabel = isCapped
+            and string.format("|cff00ff88%s (Cap)|r", PF.Formatter.FormatMoneyShort(effectiveBudget))
+            or string.format("|cffffd100%s|r", PF.Formatter.FormatMoney(effectiveBudget))
         sideFrame.infoText:SetText(string.format(
-            "Budget: |cffffd100%s|r  |  Recipes: |cff00ff88%d|r  |  Items: %s%s",
-            PF.Formatter.FormatMoney(gold), #recipes, itemsLabel, feedNote
+            "Budget: %s  |  Recipes: |cff00ff88%d|r  |  Items: %s%s",
+            budgetLabel, #recipes, itemsLabel, feedNote
         ))
     end
 
@@ -1117,6 +1247,9 @@ function PF.SideWindow.Init()
             elseif event == "PLAYER_MONEY" then
                 if sideFrame and (not sideFrame.IsShown or sideFrame:IsShown()) then
                     PF.SideWindow.RefreshRows()
+                end
+                if settingsFrame and (not settingsFrame.IsShown or settingsFrame:IsShown()) then
+                    PF.SideWindow.RefreshFilterControls()
                 end
             end
         end)

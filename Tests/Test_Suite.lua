@@ -2697,4 +2697,88 @@ do
     _G.PF.OpportunityEngine.ReevaluateSingleOpportunity = origReeval
 end
 
+-- 30. Customizable Spending Budget Cap Tests (Defaults to Player Gold, Settings UI, Slash Command, Engine Enforcement)
+do
+    local origPlayerMoney = Mock.playerMoney
+    local origPrices = _G.PCF_DB.prices
+    local origOrderBooks = _G.Profitable_DB.orderBookCache
+    local origItemCache2447 = _G.Profitable_DB.itemCache[2447]
+
+    -- 30A. ParseGoldToCopper handles plain gold numbers, g/s/c formats, auto/reset, and rejects invalid text
+    Assert(_G.PF.ParseGoldToCopper("10") == 100000, "ParseGoldToCopper('10') parses plain gold as 10g (100000c)")
+    Assert(_G.PF.ParseGoldToCopper("10.5") == 105000, "ParseGoldToCopper('10.5') parses decimal gold as 10g 50s")
+    Assert(_G.PF.ParseGoldToCopper("10g 50s") == 105000, "ParseGoldToCopper('10g 50s') parses mixed gold+silver")
+    Assert(_G.PF.ParseGoldToCopper("2g 5s 25c") == 20525, "ParseGoldToCopper('2g 5s 25c') parses full g/s/c")
+    Assert(_G.PF.ParseGoldToCopper("50s") == 5000, "ParseGoldToCopper('50s') parses silver-only input")
+    Assert(_G.PF.ParseGoldToCopper("auto") == 0 and _G.PF.ParseGoldToCopper("") == 0 and _G.PF.ParseGoldToCopper("0") == 0, "ParseGoldToCopper('auto' / '' / '0') returns 0 (All Gold)")
+    Assert(_G.PF.ParseGoldToCopper("notgold") == nil, "ParseGoldToCopper rejects invalid text cleanly")
+
+    -- 30B. GetEffectiveBudget defaults to full player gold (50g), caps to 10g when configured, and never exceeds actual wallet
+    Mock.playerMoney = 500000 -- 50g in wallet
+    _G.Profitable_DB.settings.customBudgetCopper = 0
+    local eff0, capped0, wallet0 = _G.PF.GetEffectiveBudget()
+    Assert(eff0 == 500000 and capped0 == false and wallet0 == 500000, "Default budget uses full player gold (50g, uncapped)")
+
+    -- Configure a 10g cap via Settings Window input box + Apply button
+    _G.PF.SideWindow.ToggleSettingsWindow()
+    local sf30 = _G.PF.SideWindow.settingsFrame
+    Assert(sf30 ~= nil and sf30.budgetInput ~= nil and sf30.budgetApplyBtn ~= nil and sf30.budgetAutoBtn ~= nil, "Settings window creates budget input, Apply, and Use All Gold controls")
+
+    -- Populate Peacebloom vendor flip costing 1g each (up to 40 available -> would spend 40g uncapped, must cap at 10g = 10 units!)
+    local now30 = math.floor(Mock.currentTime)
+    _G.Profitable_DB.itemCache[2447] = { name = "Peacebloom", quality = 1, itemLevel = 1, classID = 7, vendorSell = 15000 } -- 1g 50s vendor
+    _G.PCF_DB.prices = {
+        [2447] = { minBuyout = 10000, count = 40, lastUpdated = now30, source = "Scan" }, -- 1g each x 40 available
+    }
+    _G.PCF_DB.lastFullScan = now30
+    _G.Profitable_DB.orderBookCache = {}
+
+    sf30.budgetInput:SetText("10g")
+    sf30.budgetApplyBtn:Click()
+    local eff10, capped10, _, capVal10 = _G.PF.GetEffectiveBudget()
+    Assert(eff10 == 100000 and capped10 == true and capVal10 == 100000, "Applying '10g' in Settings caps effective budget at 10g out of 50g wallet")
+    Assert(_G.PF.SideWindow.frame.infoText:GetText():find("10g %(Cap%)") ~= nil, "SideWindow header displays '10g (Cap)' when custom budget cap is active")
+    Assert(sf30.budgetTitleText:GetText():find("10g Cap") ~= nil and sf30.budgetTitleText:GetText():find("Wallet: 50g") ~= nil, "Settings card shows '10g Cap (Wallet: 50g)'")
+
+    local playsAt10g = _G.PF.OpportunityEngine.FindTopOpportunities()
+    Assert(#playsAt10g == 1 and playsAt10g[1].itemId == 2447 and playsAt10g[1].quantity == 10 and playsAt10g[1].totalCost == 100000, "FindTopOpportunities caps spending at 10g (10x @ 1g) even when player has 50g")
+
+    -- Explicit budgetOverride still works independently of customBudgetCopper
+    local playsOverride = _G.PF.OpportunityEngine.FindTopOpportunities(250000)
+    Assert(#playsOverride == 1 and playsOverride[1].quantity == 25 and playsOverride[1].totalCost == 250000, "Explicit budgetOverride (25g) still takes precedence over custom cap")
+
+    -- If player's actual wallet drops below custom cap (e.g. 6g < 10g cap), effective budget respects real wallet (6g)
+    Mock.playerMoney = 60000 -- 6g
+    local effLow, cappedLow = _G.PF.GetEffectiveBudget()
+    Assert(effLow == 60000 and cappedLow == true, "Effective budget never exceeds actual player wallet (6g < 10g cap)")
+    local playsAt6g = _G.PF.OpportunityEngine.FindTopOpportunities()
+    Assert(#playsAt6g == 1 and playsAt6g[1].quantity == 6 and playsAt6g[1].totalCost == 60000, "FindTopOpportunities caps at actual 6g wallet when wallet < 10g cap")
+
+    -- Slash command '/pf budget 15' updates cap cleanly; '/pf budget auto' resets to All Gold (50g)
+    Mock.playerMoney = 500000
+    SlashCmdList["PROFITABLE"]("budget 15")
+    Assert(_G.Profitable_DB.settings.customBudgetCopper == 150000, "'/pf budget 15' sets 15g budget cap")
+    local playsAt15g = _G.PF.OpportunityEngine.FindTopOpportunities()
+    Assert(#playsAt15g == 1 and playsAt15g[1].quantity == 15, "FindTopOpportunities updates to 15x after '/pf budget 15'")
+
+    -- Clicking 'Use All Gold' resets customBudgetCopper to 0 and unlocks full 40g play within 50g wallet
+    sf30.budgetAutoBtn:Click()
+    Assert(_G.Profitable_DB.settings.customBudgetCopper == 0 and sf30.budgetInput:GetText() == "", "Clicking 'Use All Gold' clears custom budget cap")
+    local playsUncapped = _G.PF.OpportunityEngine.FindTopOpportunities()
+    Assert(#playsUncapped == 1 and playsUncapped[1].quantity == 40 and playsUncapped[1].totalCost == 400000, "Uncapped FindTopOpportunities uses full 50g wallet (40x @ 1g = 40g)")
+
+    -- Reset Filter Defaults also clears customBudgetCopper
+    SlashCmdList["PROFITABLE"]("budget 12g 50s")
+    Assert(_G.Profitable_DB.settings.customBudgetCopper == 125000, "'/pf budget 12g 50s' sets 12g 50s budget cap")
+    _G["PF_SettingsResetButton"]:Click()
+    Assert(_G.Profitable_DB.settings.customBudgetCopper == 0, "'Reset Filter Defaults' also resets customBudgetCopper to 0 (All Gold)")
+
+    -- Restore globals
+    sf30:Hide()
+    Mock.playerMoney = origPlayerMoney
+    _G.PCF_DB.prices = origPrices
+    _G.Profitable_DB.orderBookCache = origOrderBooks
+    _G.Profitable_DB.itemCache[2447] = origItemCache2447
+end
+
 print("\nAll Profitable test assertions passed successfully!")

@@ -59,6 +59,7 @@ local defaultConfig = {
         showSideWindow = true,
         onboardingDismissed = false,             -- Show welcome/AH-scan popup on startup until user clicks OK / Got It
         staleDataThresholdSeconds = 86400,       -- Require a fresh AH scan when cached data is older than 24 hours
+        customBudgetCopper = 0,                  -- 0 = Auto (use full character gold); >0 = cap spending budget (in copper)
     },
     charRecipes = {},     -- [charKey] = { [recipeKey] = recipeTable }
     vendorBuyPrices = {}, -- [itemId] = copperPrice (learned dynamically from vendors + static DB)
@@ -88,6 +89,72 @@ function PF.GetCharacterKey()
     local name = (_G.UnitName and _G.UnitName("player")) or "Player"
     local realm = (_G.GetRealmName and _G.GetRealmName()) or "Forever"
     return string.format("%s-%s", tostring(name), tostring(realm))
+end
+
+-- Parses user budget input into copper.
+-- Accepts: "", "0", "auto", "all", "reset", "off" -> 0 (use full player gold)
+--          Plain gold numbers like "10" or "10.5" -> 100000 / 105000 copper
+--          Currency strings like "10g", "10g 50s", "50s", "2g 5s 25c" -> exact copper
+-- Returns copper (number >= 0) or nil if input cannot be parsed.
+function PF.ParseGoldToCopper(input)
+    if input == nil then return 0 end
+    if type(input) == "number" then
+        if input ~= input or input < 0 or input >= math.huge then return nil end
+        return math.floor(input + 0.5)
+    end
+    if type(input) ~= "string" then return nil end
+    local trimmed = input:lower():match("^%s*(.-)%s*$") or ""
+    if trimmed == "" or trimmed == "0" or trimmed == "auto" or trimmed == "all" or trimmed == "reset" or trimmed == "off" or trimmed == "none" then
+        return 0
+    end
+
+    -- Plain numeric gold value (e.g. "10" -> 10g, "12.5" -> 12g 50s)
+    local plainNum = tonumber(trimmed)
+    if plainNum then
+        if plainNum < 0 or plainNum >= math.huge then return nil end
+        return math.floor((plainNum * 10000) + 0.5)
+    end
+
+    -- Explicit g / s / c tokens (e.g. "10g 50s", "50s", "1g 25s 50c")
+    local remainder = trimmed:gsub("%s+", "")
+    local total = 0
+    local matchedAny = false
+    local g = remainder:match("(%d+%.?%d*)g")
+    if g then
+        total = total + math.floor((tonumber(g) * 10000) + 0.5)
+        remainder = remainder:gsub("%d+%.?%d*g", "", 1)
+        matchedAny = true
+    end
+    local s = remainder:match("(%d+%.?%d*)s")
+    if s then
+        total = total + math.floor((tonumber(s) * 100) + 0.5)
+        remainder = remainder:gsub("%d+%.?%d*s", "", 1)
+        matchedAny = true
+    end
+    local c = remainder:match("(%d+)c")
+    if c then
+        total = total + math.floor(tonumber(c))
+        remainder = remainder:gsub("%d+c", "", 1)
+        matchedAny = true
+    end
+
+    if matchedAny and remainder == "" then
+        return math.max(0, total)
+    end
+    return nil
+end
+
+-- Returns: effectiveBudgetCopper, isCapped, playerGoldCopper, customBudgetCopper
+-- Defaults to full current character gold when customBudgetCopper == 0.
+-- When a custom budget cap is set, caps to min(playerGold, customBudgetCopper).
+function PF.GetEffectiveBudget()
+    local playerGold = (PF.Formatter and PF.Formatter.GetPlayerGold and PF.Formatter.GetPlayerGold()) or 0
+    local custom = Profitable_DB and Profitable_DB.settings and tonumber(Profitable_DB.settings.customBudgetCopper) or 0
+    custom = math.max(0, math.floor(custom))
+    if custom > 0 then
+        return math.min(playerGold, custom), true, playerGold, custom
+    end
+    return playerGold, false, playerGold, 0
 end
 
 -- Returns 0.15 (15%) if at a Neutral Auction House (Booty Bay / Gadgetzan / Everlook),
