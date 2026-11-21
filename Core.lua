@@ -107,6 +107,66 @@ local function RegisterSlashCommands()
             if PF.SideWindow and PF.SideWindow.ToggleSettingsWindow then
                 PF.SideWindow.ToggleSettingsWindow()
             end
+        elseif cmd == "autoopen" then
+            Profitable_DB.settings.showSideWindow = not (Profitable_DB.settings.showSideWindow ~= false)
+            if PF.SideWindow and PF.SideWindow.RefreshFilterControls then
+                PF.SideWindow.RefreshFilterControls()
+            end
+            print(string.format("|cff00ff88[Profitable]|r Auto-Open Side Window at AH: %s", Profitable_DB.settings.showSideWindow and "ON" or "OFF"))
+        elseif cmd == "minimap" then
+            local curHidden = Profitable_DB.settings.minimap and Profitable_DB.settings.minimap.hide == true
+            if PF.SideWindow and PF.SideWindow.SetMinimapButtonShown then
+                local nowShown = PF.SideWindow.SetMinimapButtonShown(curHidden)
+                print(string.format("|cff00ff88[Profitable]|r Minimap Button: %s", nowShown and "SHOWN" or "HIDDEN"))
+            end
+        elseif cmd == "source" or cmd == "pricesource" then
+            if arg == nil or arg == "" then
+                local mode = (PF.GetPriceSourceMode and PF.GetPriceSourceMode()) or "AUTO"
+                local _, info = PF.GetAHDataStatus()
+                print(string.format(
+                    "|cff00ff88[Profitable]|r Price Data Source: %s (Active: %s, %d items). Use '/pf source auto', '/pf source pcf', or '/pf source auctionator'.",
+                    mode, (info and info.activeSource) or "None", (info and info.itemCount) or 0
+                ))
+            elseif PF.SideWindow and PF.SideWindow.SetPriceSource then
+                PF.SideWindow.SetPriceSource(arg)
+            end
+        elseif cmd == "snooze" or cmd == "hidden" or cmd == "snoozed" then
+            if PF.SideWindow and PF.SideWindow.ToggleSnoozedWindow then
+                PF.SideWindow.ToggleSnoozedWindow()
+            end
+        elseif cmd == "autosnooze" then
+            Profitable_DB.settings.autoSnoozeOnCraft = not (Profitable_DB.settings.autoSnoozeOnCraft ~= false)
+            if PF.SideWindow and PF.SideWindow.RefreshFilterControls then
+                PF.SideWindow.RefreshFilterControls()
+            end
+            print(string.format("|cff00ff88[Profitable]|r Auto-Snooze Crafted Plays (12h): %s", Profitable_DB.settings.autoSnoozeOnCraft and "ON" or "OFF"))
+        elseif cmd == "clearhidden" or cmd == "clearsnooze" then
+            local cleared = (PF.ClearAllSnoozedPlays and PF.ClearAllSnoozedPlays()) or 0
+            if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
+                PF.SideWindow.ApplyFilterChange()
+            end
+            print(string.format("|cff00ff88[Profitable]|r Restored %d snoozed/hidden plays.", cleared))
+        elseif cmd == "unhide" or cmd == "unsnooze" then
+            if arg == nil or arg == "" or arg == "all" then
+                local cleared = (PF.ClearAllSnoozedPlays and PF.ClearAllSnoozedPlays()) or 0
+                if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
+                    PF.SideWindow.ApplyFilterChange()
+                end
+                print(string.format("|cff00ff88[Profitable]|r Restored %d snoozed/hidden plays.", cleared))
+            else
+                local removed, entry = false, nil
+                if PF.UnsnoozePlay then
+                    removed, entry = PF.UnsnoozePlay(arg)
+                end
+                if removed then
+                    if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
+                        PF.SideWindow.ApplyFilterChange()
+                    end
+                    print(string.format("|cff00ff88[Profitable]|r Restored %s.", (entry and (entry.itemLink or entry.itemName)) or arg))
+                else
+                    print(string.format("|cffff9900[Profitable]|r No snoozed play matched '%s'. Use '/pf hidden' to view or '/pf unhide all'.", arg))
+                end
+            end
         elseif cmd == "budget" then
             if arg == nil or arg == "" then
                 local eff, isCapped, playerGold, customCap = PF.GetEffectiveBudget()
@@ -126,16 +186,21 @@ local function RegisterSlashCommands()
             end
         else
             print("|cff00ff88Profitable Commands:|r")
-            print("  /pf          - Toggle the Profitable AH side window")
-            print("  /pf run      - Calculate and verify the Top 5 profitable plays")
-            print("  /pf scan     - Start an AH price scan (when at the AH) or calculate plays")
-            print("  /pf detail N - Open the breakdown & shopping tracker for play #1-#5")
-            print("  /pf options  - Open the Profitable Filter & Play Options window")
-            print("  /pf budget X - Set max spending budget (e.g. '/pf budget 10g' or '/pf budget auto')")
-            print("  /pf buyout   - Toggle Buyout-Only mode (excludes bid-only auctions; Default: ON)")
-            print("  /pf de       - Toggle Disenchant plays on or off (Default: ON)")
-            print("  /pf alts     - Toggle using known recipes across all alts vs current character")
-            print("  /pf welcome  - Re-open the Getting Started / AH Scan guide popup")
+            print("  /pf             - Toggle the Profitable AH side window")
+            print("  /pf run         - Calculate and verify the Top 5 profitable plays")
+            print("  /pf scan        - Start an AH price scan (when at the AH) or calculate plays")
+            print("  /pf detail N    - Open the breakdown & shopping tracker for play #1-#5")
+            print("  /pf options     - Open the Profitable Filter & Play Options window")
+            print("  /pf source X    - Set price source: auto (freshest), pcf, or auctionator")
+            print("  /pf autoopen    - Toggle auto-opening Profitable when visiting the AH")
+            print("  /pf minimap     - Show or hide the Minimap button")
+            print("  /pf hidden      - View & restore snoozed/hidden plays (or '/pf unhide all')")
+            print("  /pf autosnooze  - Toggle 12h auto-snooze after crafting a recommended play")
+            print("  /pf budget X    - Set max spending budget (e.g. '/pf budget 10g' or '/pf budget auto')")
+            print("  /pf buyout      - Toggle Buyout-Only mode (excludes bid-only auctions; Default: ON)")
+            print("  /pf de          - Toggle Disenchant plays on or off (Default: ON)")
+            print("  /pf alts        - Toggle using known recipes across all alts vs current character")
+            print("  /pf welcome     - Re-open the Getting Started / AH Scan guide popup")
         end
     end
 end
@@ -168,10 +233,12 @@ local function ConfigureEmbeddedPCF()
     end
 
     -- Ensure PCF's AH scan button is active out of the box when Profitable is enabled
-    -- (unless the user explicitly toggled it off via /pcf button), even alongside TSM/Auctionator.
+    -- unless the user chose Auctionator-only mode or explicitly toggled it off via /pcf button.
+    local sourceMode = (PF.GetPriceSourceMode and PF.GetPriceSourceMode()) or "AUTO"
     if _G.PCF_DB and type(_G.PCF_DB.settings) == "table" and not _G.PCF_DB.settings.userSetScanButton then
-        if _G.PCF_DB.settings.showScanButton ~= true then
-            _G.PCF_DB.settings.showScanButton = true
+        local desiredShow = (sourceMode ~= "AUCTIONATOR")
+        if _G.PCF_DB.settings.showScanButton ~= desiredShow then
+            _G.PCF_DB.settings.showScanButton = desiredShow
             if _G.PCF and _G.PCF.Scanner and type(_G.PCF.Scanner.UpdateVisibility) == "function" then
                 _G.PCF.Scanner.UpdateVisibility()
             end
@@ -196,6 +263,9 @@ function PF.Initialize()
     if PF.MarketFeed and PF.MarketFeed.OnFeedLoaded then
         PF.MarketFeed.OnFeedLoaded()
     end
+    if PF.AuctionatorSource and PF.AuctionatorSource.Init then
+        PF.AuctionatorSource.Init()
+    end
     if PF.AHVerifier and PF.AHVerifier.Init then
         PF.AHVerifier.Init()
     end
@@ -214,9 +284,9 @@ function PF.Initialize()
         if PF.SideWindow and PF.SideWindow.ShowOnboardingPopup then
             PF.SideWindow.ShowOnboardingPopup(false)
         end
-        print("|cffffcc00[Profitable]|r Welcome! Profitable will not function until it has Auction House price data. Visit an Auctioneer, open the AH, and click 'Scan AH Now' (or 'PCF Scan').")
+        print("|cffffcc00[Profitable]|r Welcome! Profitable needs Auction House price data. Open the AH and click 'Scan AH Now' (or run an Auctionator Full Scan).")
     elseif dataStatus == "NO_DATA" then
-        print("|cffffcc00[Profitable]|r Loaded (no Auction House scan data found yet — open the AH and click 'Scan AH Now' or 'PCF Scan' before calculating plays).")
+        print("|cffffcc00[Profitable]|r Loaded (no Auction House scan data found yet — open the AH and click 'Scan AH Now' or run an Auctionator scan before calculating plays).")
     elseif dataStatus == "STALE" then
         print(string.format("|cffff9900[Profitable]|r Loaded (Auction House data is %s old — open the AH and run a fresh scan for accurate plays).", (dataInfo and dataInfo.ageText) or "24h+"))
     else

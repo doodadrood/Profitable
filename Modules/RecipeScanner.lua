@@ -1414,6 +1414,99 @@ function PF.RecipeScanner.CraftRecipe(recipe, quantity)
     return false, "OPENING_PROFESSION"
 end
 
+local function IsCraftingActionType(actionType)
+    return actionType == "CRAFT_AH" or actionType == "CRAFT_VENDOR" or actionType == "CRAFT_DE"
+end
+
+local function FindRecommendedCraftingPlay(itemId, spellId)
+    if not Profitable_DB then
+        return nil
+    end
+    local function CheckList(list)
+        if type(list) ~= "table" then return nil end
+        for _, opp in ipairs(list) do
+            if type(opp) == "table" and IsCraftingActionType(opp.actionType) then
+                if itemId and opp.itemId == itemId then
+                    return opp
+                end
+                if spellId and opp.recipe and opp.recipe.recipeId == spellId then
+                    return opp
+                end
+            end
+        end
+        return nil
+    end
+
+    local matched = CheckList(Profitable_DB.lastTopPlays) or CheckList(Profitable_DB.lastHonorableMentions)
+    if not matched and type(Profitable_DB.activePlay) == "table" and IsCraftingActionType(Profitable_DB.activePlay.actionType) then
+        local ap = Profitable_DB.activePlay
+        if (itemId and ap.itemId == itemId) or (spellId and ap.recipe and ap.recipe.recipeId == spellId) then
+            matched = ap
+        end
+    end
+    return matched
+end
+
+function PF.RecipeScanner.HandleCraftCompleted(itemId, itemLink, spellId)
+    if not Profitable_DB or not Profitable_DB.settings or Profitable_DB.settings.autoSnoozeOnCraft == false then
+        return false
+    end
+    local opp = FindRecommendedCraftingPlay(itemId, spellId)
+    if not opp then
+        return false
+    end
+    if PF.IsPlaySnoozed and PF.IsPlaySnoozed(opp) then
+        return false
+    end
+    local dur = tonumber(Profitable_DB.settings.craftAutoSnoozeSeconds) or 43200
+    if PF.SnoozePlay then
+        PF.SnoozePlay(opp, dur, "crafted")
+    end
+    local durText = (dur == 43200 and "12h")
+        or (dur == 86400 and "24h")
+        or (PF.FormatAgeShort and PF.FormatAgeShort(dur))
+        or "12h"
+    print(string.format(
+        "|cff00ff88[Profitable]|r Crafted %s — auto-snoozed for %s so your Top 5 rotates to fresh plays. (Undo in Options or /pf unhide)",
+        opp.itemLink or itemLink or opp.itemName or ("Item #" .. tostring(opp.itemId)),
+        durText
+    ))
+    if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
+        PF.SideWindow.ApplyFilterChange()
+    end
+    return true
+end
+
+PF.OnCraftedItemCompleted = PF.RecipeScanner.HandleCraftCompleted
+
+local function ExtractCreatedLootItem(msg)
+    if type(msg) ~= "string" or msg == "" then
+        return nil, nil
+    end
+    local matched = false
+    if type(_G.LOOT_ITEM_CREATED_SELF) == "string" and _G.LOOT_ITEM_CREATED_SELF ~= "" then
+        local prefix = _G.LOOT_ITEM_CREATED_SELF:match("^(.-)%%s")
+        if prefix and prefix ~= "" and msg:sub(1, #prefix) == prefix then
+            matched = true
+        end
+    end
+    if not matched and type(_G.LOOT_ITEM_CREATED_SELF_MULTIPLE) == "string" and _G.LOOT_ITEM_CREATED_SELF_MULTIPLE ~= "" then
+        local prefix = _G.LOOT_ITEM_CREATED_SELF_MULTIPLE:match("^(.-)%%s")
+        if prefix and prefix ~= "" and msg:sub(1, #prefix) == prefix then
+            matched = true
+        end
+    end
+    if not matched and msg:find("^You create:") then
+        matched = true
+    end
+    if not matched then
+        return nil, nil
+    end
+    local itemId = tonumber(msg:match("item:(%d+)"))
+    local itemLink = msg:match("(|c%x+|Hitem:.-|h%[.-%]|h|r)")
+    return itemId, itemLink
+end
+
 function PF.RecipeScanner.Init()
     if PF.RecipeScanner._initialized then return end
     PF.RecipeScanner._initialized = true
@@ -1426,12 +1519,42 @@ function PF.RecipeScanner.Init()
         pcall(frame.RegisterEvent, frame, "TRADE_SKILL_UPDATE")
         pcall(frame.RegisterEvent, frame, "TRADE_SKILL_DATA_SOURCE_CHANGED")
         pcall(frame.RegisterEvent, frame, "TRADE_SKILL_LIST_UPDATE")
+        pcall(frame.RegisterEvent, frame, "TRADE_SKILL_ITEM_CRAFTED_RESULT")
         pcall(frame.RegisterEvent, frame, "NEW_RECIPE_LEARNED")
         pcall(frame.RegisterEvent, frame, "CRAFT_SHOW")
         pcall(frame.RegisterEvent, frame, "CRAFT_UPDATE")
         pcall(frame.RegisterEvent, frame, "PLAYER_ENTERING_WORLD")
         pcall(frame.RegisterEvent, frame, "SKILL_LINES_CHANGED")
-        frame:SetScript("OnEvent", function(_, event)
+        pcall(frame.RegisterEvent, frame, "CHAT_MSG_LOOT")
+        pcall(frame.RegisterEvent, frame, "UNIT_SPELLCAST_SUCCEEDED")
+        frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
+            if event == "TRADE_SKILL_ITEM_CRAFTED_RESULT" then
+                if type(arg1) == "table" and not (PF.IsSecret and PF.IsSecret(arg1)) then
+                    local link = arg1.hyperlink
+                    local itemId = tonumber(arg1.itemID) or (type(link) == "string" and tonumber(link:match("item:(%d+)")))
+                    if itemId and itemId > 0 then
+                        PF.RecipeScanner.HandleCraftCompleted(itemId, link, nil)
+                    end
+                end
+                return
+            end
+            if event == "CHAT_MSG_LOOT" then
+                if not (PF.IsSecret and PF.IsSecret(arg1)) then
+                    local itemId, itemLink = ExtractCreatedLootItem(arg1)
+                    if itemId and itemId > 0 then
+                        PF.RecipeScanner.HandleCraftCompleted(itemId, itemLink, nil)
+                    end
+                end
+                return
+            end
+            if event == "UNIT_SPELLCAST_SUCCEEDED" then
+                if not (PF.IsSecret and (PF.IsSecret(arg1) or PF.IsSecret(arg3))) then
+                    if arg1 == "player" and type(arg3) == "number" and arg3 > 0 then
+                        PF.RecipeScanner.HandleCraftCompleted(nil, nil, arg3)
+                    end
+                end
+                return
+            end
             if event == "PLAYER_ENTERING_WORLD" or event == "SKILL_LINES_CHANGED" then
                 local changed = PF.RecipeScanner.RepairSavedRecipeProfessions()
                 if changed > 0 and PF.SideWindow and PF.SideWindow.frame

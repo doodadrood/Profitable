@@ -15,6 +15,7 @@ require("Data.DisenchantDatabase")
 require("Data.RecipeDatabase")
 require("Modules.RecipeScanner")
 require("Modules.MarketFeed")
+require("Modules.AuctionatorSource")
 require("Modules.OpportunityEngine")
 require("Modules.AHVerifier")
 require("UI.DetailWindow")
@@ -3027,6 +3028,307 @@ do
     _G.PCF_DB.prices = origPrices31
     _G.Profitable_DB = origDB31
     _G.PF.LoadConfig(origDB31)
+end
+
+-- =============================================================================
+-- 32. User Feedback Features: Auctionator Source, Auto-Open Toggle, AH & Minimap
+--     Buttons (OneForAll/LibDBIcon-compatible), Manual 24h/Perm Snooze, and
+--     12h Auto-Snooze on Craft
+-- =============================================================================
+do
+    local origDB32 = _G.Profitable_DB
+    local origPCF32 = _G.PCF_DB
+    local origAtr32 = _G.Auctionator
+    local origAtrDB32 = _G.AUCTIONATOR_PRICE_DATABASE
+    local origTime32 = Mock.currentTime
+    local origShift32 = _G.IsShiftKeyDown
+    local origPCFBtn32 = _G.PCF_AuctionScanButton
+
+    local db32 = {
+        version = 4,
+        settings = {
+            onboardingDismissed = true,
+            includeSkillMatchedBaselineRecipes = false,
+            includeTrainerRecommendations = false,
+            assumeCanDisenchant = false,
+            showCraftPlays = true,
+            showVendorPlays = true,
+            showSideWindow = true,
+            autoSnoozeOnCraft = true,
+            priceSource = "AUTO",
+            minimap = { hide = false, minimapPos = 220 },
+        },
+        charRecipes = {
+            [PF.GetCharacterKey()] = {
+                ["CraftTest:7966"] = {
+                    name = "Solid Grinding Stone",
+                    profession = "Blacksmithing",
+                    recipeId = 9920,
+                    outputItemId = 7966,
+                    avgMade = 1,
+                    reagents = { { itemId = 7912, name = "Solid Stone", count = 4 } },
+                },
+                ["CraftTest:2852"] = {
+                    name = "Copper Chain Pants",
+                    profession = "Blacksmithing",
+                    recipeId = 2663,
+                    outputItemId = 2852,
+                    avgMade = 1,
+                    reagents = { { itemId = 2840, name = "Copper Bar", count = 4 } },
+                },
+            },
+        },
+        itemCache = {
+            [2447] = { name = "Peacebloom", quality = 1, itemLevel = 1, classID = 7, vendorSell = 15000 },
+            [2852] = { name = "Copper Chain Pants", quality = 2, itemLevel = 10, classID = 4, invType = "INVTYPE_LEGS", vendorSell = 14000 },
+            [7966] = { name = "Solid Grinding Stone", quality = 1, itemLevel = 30, classID = 7, vendorSell = 100 },
+            [7912] = { name = "Solid Stone", quality = 1, itemLevel = 30, classID = 7, vendorSell = 50 },
+            [2840] = { name = "Copper Bar", quality = 1, itemLevel = 5, classID = 7, vendorSell = 10 },
+        },
+        orderBookCache = {},
+        snoozedPlays = {},
+        lastTopPlays = {},
+        lastHonorableMentions = {},
+    }
+    PF.LoadConfig(db32)
+
+    -- 32A. Auctionator-Only Data Source (empty PCF_DB!)
+    _G.PCF_DB = { prices = {}, lastFullScan = 0, settings = { showScanButton = true } }
+    local statusNoData = PF.GetAHDataStatus()
+    Assert(statusNoData == "NO_DATA", "Empty PCF_DB and no Auctionator reports NO_DATA")
+
+    local atrDBUpdateCallback = nil
+    local atrRealmTable = {
+        ["2447"] = { m = 10000, a = { ["100"] = 20 } }, -- Peacebloom 1g -> vendor 1g50s (+10g profit!)
+        ["7912"] = { m = 1000,  a = { ["100"] = 80 } }, -- Solid Stone 10s (4x = 40s per craft)
+        ["7966"] = { m = 9000,  a = { ["100"] = 20 } }, -- Solid Grinding Stone 90s on AH (net 85.5s -> +45.5s * 20 = +9g10s)
+        ["2840"] = { m = 1500,  a = { ["100"] = 80 } }, -- Copper Bar 15s (4x = 60s per craft) -> Pants vendor 1g40s (+80s * 20 = +16g)
+        ["p:123"] = { m = 500,  a = { ["100"] = 1 } },  -- Battle pet entry must be skipped safely
+    }
+    _G.AUCTIONATOR_PRICE_DATABASE = {
+        __dbversion = 7,
+        ["Forever Alliance"] = atrRealmTable,
+    }
+    _G.Auctionator = {
+        SavedState = { TimeOfLastFullScan = math.floor(Mock.currentTime) - 120 },
+        Database = { db = atrRealmTable },
+        API = {
+            v1 = {
+                GetAuctionPriceByItemID = function(_, id)
+                    local row = atrRealmTable[tostring(id)]
+                    return row and row.m or nil
+                end,
+                GetAuctionAgeByItemID = function(_, id)
+                    return atrRealmTable[tostring(id)] and 0 or nil
+                end,
+                RegisterForDBUpdate = function(_, cb)
+                    atrDBUpdateCallback = cb
+                end,
+            },
+        },
+    }
+    PF.AuctionatorSource.Init()
+    Assert(type(atrDBUpdateCallback) == "function", "AuctionatorSource registers for Auctionator.API.v1.RegisterForDBUpdate")
+
+    local atrStatus, atrInfo = PF.GetAHDataStatus()
+    Assert(atrStatus == "FRESH" and atrInfo.activeSource == "Auctionator" and atrInfo.auctionatorItems == 4,
+        "GetAHDataStatus detects FRESH Auctionator data (4 items, skipping battle pets) even when PCF_DB is empty")
+
+    local atrPlays = PF.OpportunityEngine.FindTopOpportunities(220000)
+    Assert(#atrPlays == 3, "OpportunityEngine discovers all 3 plays purely from Auctionator scan data")
+    Assert(atrPlays[1].itemId == 2852 and atrPlays[2].itemId == 2447 and atrPlays[3].itemId == 7966,
+        "Auctionator-sourced plays rank accurately by profit (Copper Chain Pants > Peacebloom > Solid Grinding Stone)")
+
+    -- AUTO mode picks whichever source has the fresher timestamp
+    _G.PCF_DB.prices[2447] = { minBuyout = 12000, count = 20, lastUpdated = math.floor(Mock.currentTime) - 600 }
+    local autoPriceOlderPCF, _, autoSrc1 = PF.OpportunityEngine.ResolveAHPrice(2447)
+    Assert(autoPriceOlderPCF == 10000 and autoSrc1 == "Auctionator",
+        "AUTO mode prefers Auctionator when Auctionator scan is fresher than PCF_DB")
+
+    _G.PCF_DB.prices[2447].lastUpdated = math.floor(Mock.currentTime) - 10
+    local autoPriceNewerPCF, _, autoSrc2 = PF.OpportunityEngine.ResolveAHPrice(2447)
+    Assert(autoPriceNewerPCF == 12000 and autoSrc2 ~= "Auctionator",
+        "AUTO mode prefers PCF_DB when PCF scan is fresher than Auctionator")
+
+    -- Explicit AUCTIONATOR mode ignores PCF_DB and auto-hides PCF Scan button (unless userSetScanButton)
+    PF.SideWindow.SetPriceSource("auctionator", true)
+    Assert(PF.GetPriceSourceMode() == "AUCTIONATOR", "SetPriceSource switches mode to AUCTIONATOR")
+    local atrOnlyPrice, _, atrOnlySrc = PF.OpportunityEngine.ResolveAHPrice(2447)
+    Assert(atrOnlyPrice == 10000 and atrOnlySrc == "Auctionator",
+        "AUCTIONATOR mode strictly uses Auctionator even when PCF_DB has a newer entry")
+    Assert(_G.PCF_DB.settings.showScanButton == false,
+        "AUCTIONATOR mode hides embedded PCF Scan button when user has not explicitly pinned it")
+
+    -- Explicit PCF mode ignores Auctionator
+    PF.SideWindow.SetPriceSource("pcf", true)
+    Assert(PF.GetPriceSourceMode() == "PCF" and _G.PCF_DB.settings.showScanButton == true,
+        "PCF mode switches back and restores PCF Scan button")
+    local pcfOnlyPrice = PF.OpportunityEngine.ResolveAHPrice(7966)
+    Assert(pcfOnlyPrice == nil, "PCF mode ignores Auctionator-only items")
+
+    -- Switch back to AUTO and clear PCF_DB for clean snooze tests
+    PF.SideWindow.SetPriceSource("auto", true)
+    _G.PCF_DB.prices = {}
+
+    -- 32B. Auto-Open Side Window Toggle + AH Frame Toggle Button + Minimap Button (OneForAll/LibDBIcon compatible)
+    PF.SideWindow.frame:Hide()
+    Profitable_DB.settings.showSideWindow = false
+    local activeAHParent32 = (_G.AuctionHouseFrame and _G.AuctionHouseFrame:IsShown()) and _G.AuctionHouseFrame or _G.AuctionFrame
+    _G.PCF_AuctionScanButton = CreateFrame("Button", "PCF_AuctionScanButton", activeAHParent32)
+    _G.PCF_AuctionScanButton:Show()
+
+    PF.SideWindow.eventFrame:Trigger("AUCTION_HOUSE_SHOW")
+    Mock.FlushTimers(10)
+    Assert(not PF.SideWindow.frame:IsShown(), "SideWindow stays hidden on AUCTION_HOUSE_SHOW when showSideWindow == false")
+    Assert(PF.SideWindow.ahToggleButton ~= nil and PF.SideWindow.ahToggleButton:IsShown(),
+        "Profitable AH toggle button is shown on AuctionFrame even when auto-open is disabled")
+    Assert(PF.SideWindow.ahToggleButton.points and PF.SideWindow.ahToggleButton.points[1]
+        and PF.SideWindow.ahToggleButton.points[1][2] == _G.PCF_AuctionScanButton,
+        "AH toggle button anchors cleanly to the left of PCF_AuctionScanButton when visible")
+
+    -- Clicking AH toggle button opens SideWindow; clicking again hides it
+    PF.SideWindow.ahToggleButton:Click("LeftButton")
+    Assert(PF.SideWindow.frame:IsShown(), "Clicking AH toggle button opens Profitable SideWindow")
+    PF.SideWindow.ahToggleButton:Click("LeftButton")
+    Assert(not PF.SideWindow.frame:IsShown(), "Clicking AH toggle button again closes Profitable SideWindow")
+
+    -- When PCF_AuctionScanButton is hidden, AH toggle button anchors to active AH frame TOPRIGHT
+    _G.PCF_AuctionScanButton:Hide()
+    PF.SideWindow.UpdateAHToggleButtonAnchor()
+    Assert(PF.SideWindow.ahToggleButton.points and PF.SideWindow.ahToggleButton.points[1]
+        and PF.SideWindow.ahToggleButton.points[1][2] == activeAHParent32,
+        "AH toggle button anchors cleanly to AH frame TOPRIGHT when PCF Scan button is hidden")
+
+    -- Minimap button uses LibDBIcon10_Profitable naming + Minimap parent + dataObject for OneForAll/MBB/HidingBar
+    local mmBtn = _G["LibDBIcon10_Profitable"]
+    Assert(mmBtn ~= nil and mmBtn == PF.SideWindow.minimapButton, "Minimap button created with LibDBIcon10_Profitable name")
+    Assert(mmBtn:GetParent() == _G.Minimap and mmBtn.width == 31 and mmBtn.height == 31,
+        "Minimap button is parented to Minimap with standard 31x31 LibDBIcon dimensions")
+    Assert(mmBtn.icon ~= nil and mmBtn.overlay ~= nil and mmBtn.dataObject ~= nil and mmBtn.dataObject.type == "launcher",
+        "Minimap button exposes standard LibDBIcon icon/overlay/dataObject fields for collector addons like OneForAll")
+    Assert(mmBtn:IsShown(), "Minimap button is shown by default")
+
+    mmBtn:Click("LeftButton")
+    Assert(PF.SideWindow.frame:IsShown(), "Left-clicking Minimap button opens Profitable SideWindow")
+    PF.SideWindow.SetMinimapButtonShown(false)
+    Assert(not mmBtn:IsShown() and Profitable_DB.settings.minimap.hide == true,
+        "SetMinimapButtonShown(false) hides Minimap button and persists LibDBIcon minimap.hide = true")
+    SlashCmdList["PROFITABLE"]("minimap")
+    Assert(mmBtn:IsShown() and Profitable_DB.settings.minimap.hide == false,
+        "/pf minimap toggles Minimap button back ON")
+
+    -- Verify /pf autoopen toggles showSideWindow
+    SlashCmdList["PROFITABLE"]("autoopen")
+    Assert(Profitable_DB.settings.showSideWindow == true, "/pf autoopen toggles auto-open back ON")
+
+    -- 32C. Manual Snooze (24h & Permanent) + Rotation + Expiry + Unhide UI
+    PF.AHVerifier.RecalculateFromCache()
+    PF.SideWindow.Refresh()
+    Assert(#Profitable_DB.lastTopPlays == 3 and Profitable_DB.lastTopPlays[1].itemId == 2852,
+        "Top plays initialized with Copper Chain Pants (#1), Peacebloom (#2), Solid Grinding Stone (#3)")
+
+    -- Click the compact 'x' snooze button on Row 1 (24h snooze)
+    _G.IsShiftKeyDown = function() return false end
+    local row1SnoozeBtn = _G["PF_SideWindowPlayButton1_Snooze"]
+    Assert(row1SnoozeBtn ~= nil and row1SnoozeBtn:IsShown(), "Row 1 displays compact 'x' snooze button")
+    row1SnoozeBtn:Click("LeftButton")
+
+    Assert(PF.IsPlaySnoozed({ actionType = "CRAFT_VENDOR", itemId = 2852 }) == true,
+        "Clicking Row 1 'x' snoozes Copper Chain Pants")
+    Assert(#Profitable_DB.lastTopPlays == 2 and Profitable_DB.lastTopPlays[1].itemId == 2447,
+        "Snoozing #1 immediately removes it and promotes Peacebloom to #1")
+
+    -- Shift-Right-Click Row 1 (Peacebloom) -> Permanent hide
+    _G.IsShiftKeyDown = function() return true end
+    _G["PF_SideWindowPlayButton1"]:Click("RightButton")
+    local _, pbSnoozeEntry = PF.IsPlaySnoozed({ actionType = "VENDOR", itemId = 2447 })
+    Assert(pbSnoozeEntry ~= nil and pbSnoozeEntry.expiresAt == 0 and pbSnoozeEntry.reason == "permanent",
+        "Shift-Right-Click on a row permanently hides the play (expiresAt == 0)")
+    Assert(#Profitable_DB.lastTopPlays == 1 and Profitable_DB.lastTopPlays[1].itemId == 7966,
+        "Permanent hide immediately promotes Solid Grinding Stone to #1")
+    _G.IsShiftKeyDown = function() return false end
+
+    -- DetailWindow Snooze button also snoozes and closes DetailWindow
+    PF.DetailWindow.ShowOpportunity(Profitable_DB.lastTopPlays[1])
+    Assert(PF.DetailWindow.frame:IsShown() and PF.DetailWindow.frame.snoozeBtn ~= nil,
+        "DetailWindow displays header 'Snooze 24h' button")
+    PF.DetailWindow.frame.snoozeBtn:Click("LeftButton")
+    Assert(not PF.DetailWindow.frame:IsShown(), "Clicking DetailWindow 'Snooze 24h' closes DetailWindow")
+    Assert(PF.IsPlaySnoozed({ actionType = "CRAFT_AH", itemId = 7966 }) == true and #Profitable_DB.lastTopPlays == 0,
+        "DetailWindow 'Snooze 24h' snoozes Solid Grinding Stone and clears it from Top 5")
+
+    -- Snoozed Plays Manager UI lists all 3 active snoozes and lets user unhide individually
+    PF.SideWindow.ToggleSnoozedWindow()
+    Assert(PF.SideWindow.snoozedFrame ~= nil and PF.SideWindow.snoozedFrame:IsShown(),
+        "Snoozed Plays management window opens cleanly")
+    Assert(#PF.GetActiveSnoozedPlays() == 3, "GetActiveSnoozedPlays reports 3 active snoozed plays")
+
+    -- Advance time by 24h + 1s -> 24h snoozes expire automatically, permanent hide remains!
+    Mock.currentTime = Mock.currentTime + 86401
+    _G.Auctionator.SavedState.TimeOfLastFullScan = math.floor(Mock.currentTime) - 60
+    PF.SideWindow.ApplyFilterChange()
+    Assert(not PF.IsPlaySnoozed({ actionType = "CRAFT_VENDOR", itemId = 2852 }),
+        "24h snooze on Copper Chain Pants automatically expires after 24 hours")
+    Assert(not PF.IsPlaySnoozed({ actionType = "CRAFT_AH", itemId = 7966 }),
+        "24h snooze on Solid Grinding Stone automatically expires after 24 hours")
+    Assert(PF.IsPlaySnoozed({ actionType = "VENDOR", itemId = 2447 }) == true,
+        "Permanent hide on Peacebloom persists after 24 hours")
+
+    -- Slash command /pf unhide Peacebloom restores permanent hide
+    SlashCmdList["PROFITABLE"]("unhide Peacebloom")
+    Assert(not PF.IsPlaySnoozed({ actionType = "VENDOR", itemId = 2447 }) and #Profitable_DB.lastTopPlays == 3,
+        "/pf unhide <name> restores a permanently hidden play and refreshes Top 5")
+
+    -- 32D. Auto-Snooze on Craft (12 Hours)
+    -- Crafting Solid Grinding Stone (7966) via TRADE_SKILL_ITEM_CRAFTED_RESULT auto-snoozes it for 12h!
+    PF.RecipeScanner.frame:Trigger("TRADE_SKILL_ITEM_CRAFTED_RESULT", {
+        itemID = 7966,
+        hyperlink = "|cffffffff|Hitem:7966:0:0:0|h[Solid Grinding Stone]|h|r",
+    })
+    local isCraftSnoozed, craftEntry = PF.IsPlaySnoozed({ actionType = "CRAFT_AH", itemId = 7966 })
+    Assert(isCraftSnoozed == true and craftEntry.reason == "crafted" and craftEntry.durationSeconds == 43200,
+        "Completing craft (TRADE_SKILL_ITEM_CRAFTED_RESULT) auto-snoozes Solid Grinding Stone for 12 hours")
+    Assert(#Profitable_DB.lastTopPlays == 2,
+        "Auto-snooze on craft immediately removes crafted item from Top 5")
+
+    -- Crafting an unrelated/intermediate item (e.g. Copper Bar 2840) must NOT be auto-snoozed
+    PF.RecipeScanner.frame:Trigger("CHAT_MSG_LOOT", "You create: |cffffffff|Hitem:2840:0:0:0|h[Copper Bar]|h|r.")
+    Assert(not PF.IsPlaySnoozed({ actionType = "CRAFT_AH", itemId = 2840 }),
+        "Crafting an unrelated/intermediate item does not trigger auto-snooze")
+
+    -- Crafting Copper Chain Pants via Classic CHAT_MSG_LOOT ("You create: ...") also auto-snoozes for 12h
+    PF.RecipeScanner.frame:Trigger("CHAT_MSG_LOOT", "You create: |cff1eff00|Hitem:2852:0:0:0|h[Copper Chain Pants]|h|r.")
+    local isLootCraftSnoozed, lootCraftEntry = PF.IsPlaySnoozed({ actionType = "CRAFT_VENDOR", itemId = 2852 })
+    Assert(isLootCraftSnoozed == true and lootCraftEntry.reason == "crafted" and lootCraftEntry.durationSeconds == 43200,
+        "Completing craft (CHAT_MSG_LOOT 'You create:') auto-snoozes Copper Chain Pants for 12 hours")
+
+    -- Still snoozed at 11 hours, automatically restored after 12 hours
+    Mock.currentTime = Mock.currentTime + (11 * 3600)
+    _G.Auctionator.SavedState.TimeOfLastFullScan = math.floor(Mock.currentTime) - 60
+    Assert(PF.IsPlaySnoozed({ actionType = "CRAFT_AH", itemId = 7966 }) == true,
+        "12h craft auto-snooze remains active at 11 hours")
+    Mock.currentTime = Mock.currentTime + (2 * 3600)
+    _G.Auctionator.SavedState.TimeOfLastFullScan = math.floor(Mock.currentTime) - 60
+    PF.SideWindow.ApplyFilterChange()
+    Assert(not PF.IsPlaySnoozed({ actionType = "CRAFT_AH", itemId = 7966 }) and #Profitable_DB.lastTopPlays == 3,
+        "12h craft auto-snooze automatically expires after 12 hours and restores plays")
+
+    -- Disabling autoSnoozeOnCraft (via Options / /pf autosnooze) prevents auto-snoozing on craft
+    SlashCmdList["PROFITABLE"]("autosnooze")
+    Assert(Profitable_DB.settings.autoSnoozeOnCraft == false, "/pf autosnooze toggles auto-snooze on craft OFF")
+    PF.RecipeScanner.frame:Trigger("TRADE_SKILL_ITEM_CRAFTED_RESULT", { itemID = 7966 })
+    Assert(not PF.IsPlaySnoozed({ actionType = "CRAFT_AH", itemId = 7966 }),
+        "Craft completion does NOT auto-snooze when autoSnoozeOnCraft is OFF")
+
+    -- Restore globals cleanly
+    _G.PCF_AuctionScanButton = origPCFBtn32
+    _G.IsShiftKeyDown = origShift32
+    Mock.currentTime = origTime32
+    _G.Auctionator = origAtr32
+    _G.AUCTIONATOR_PRICE_DATABASE = origAtrDB32
+    _G.PCF_DB = origPCF32
+    _G.Profitable_DB = origDB32
+    PF.LoadConfig(origDB32)
 end
 
 print("\nAll Profitable test assertions passed successfully!")

@@ -24,6 +24,7 @@ _G.SlashCmdList = _G.SlashCmdList or {}
 _G.GetTime = function() return Mock.currentTime end
 _G.time = function() return math.floor(Mock.currentTime) end
 _G.UnitName = function(unit) return unit == "player" and "ProfitTester" or "Target" end
+_G.UnitFactionGroup = function(unit) return "Alliance", "Alliance" end
 _G.GetRealmName = function() return "Forever" end
 _G.GetMoney = function() return Mock.playerMoney end
 
@@ -71,6 +72,7 @@ _G.CreateFrame = function(frameType, name, parent, template)
     if name then _G[name] = frame end
     function frame:GetName() return self.name end
     function frame:GetParent() return self.parent end
+    function frame:SetParent(p) self.parent = p end
     function frame:RegisterEvent(event) self.events[event] = true end
     function frame:UnregisterEvent(event) self.events[event] = nil end
     function frame:SetScript(name, func) self.scripts[name] = func end
@@ -83,9 +85,9 @@ _G.CreateFrame = function(frameType, name, parent, template)
             self.scripts["OnEvent"](self, event, ...)
         end
     end
-    function frame:Click()
+    function frame:Click(mouseButton)
         if self.scripts["OnClick"] then
-            self.scripts["OnClick"](self)
+            self.scripts["OnClick"](self, mouseButton or "LeftButton")
         end
     end
     function frame:SetOwner(owner) self.owner = owner end
@@ -96,17 +98,21 @@ _G.CreateFrame = function(frameType, name, parent, template)
     function frame:SetSize(w, h) self.width = w; self.height = h end
     function frame:SetWidth(w) self.width = w end
     function frame:SetHeight(h) self.height = h end
-    function frame:SetPoint(...) end
-    function frame:ClearAllPoints() end
+    function frame:SetPoint(...) self.points = self.points or {}; table.insert(self.points, { ... }) end
+    function frame:ClearAllPoints() self.points = {} end
     function frame:SetAllPoints(...) end
     function frame:SetFrameStrata(s) self.strata = s end
     function frame:GetFrameStrata() return self.strata end
+    function frame:SetFrameLevel(l) self.frameLevel = l end
+    function frame:GetFrameLevel() return self.frameLevel or 1 end
     function frame:SetToplevel(v) self.toplevel = (v == true) end
     function frame:IsToplevel() return self.toplevel == true end
     function frame:Raise() self.raiseCount = (self.raiseCount or 0) + 1 end
     function frame:SetMovable(...) end
     function frame:EnableMouse(...) end
     function frame:RegisterForDrag(...) end
+    function frame:RegisterForClicks(...) end
+    function frame:SetHighlightTexture(tex) self.highlightTexture = tex end
     function frame:StartMoving() end
     function frame:StopMovingOrSizing() end
     function frame:SetText(t) self.text = t end
@@ -134,12 +140,14 @@ _G.CreateFrame = function(frameType, name, parent, template)
     function frame:SetValueStep(...) end
     function frame:SetThumbTexture(...) end
     function frame:CreateTexture(...)
-        return {
-            SetSize = function() end,
-            SetAllPoints = function() end,
-            SetColorTexture = function() end,
-            SetTexture = function() end,
-        }
+        local tex = {}
+        function tex:SetSize(w, h) self.width = w; self.height = h end
+        function tex:SetAllPoints(...) end
+        function tex:SetPoint(...) end
+        function tex:SetColorTexture(...) end
+        function tex:SetTexture(t) self.texture = t end
+        function tex:SetTexCoord(...) end
+        return tex
     end
     function frame:CreateFontString(...)
         local fs = { text = "", shown = true }
@@ -158,6 +166,7 @@ _G.CreateFrame = function(frameType, name, parent, template)
 end
 
 _G.UIParent = _G.CreateFrame("Frame", "UIParent")
+_G.Minimap = _G.CreateFrame("Frame", "Minimap", _G.UIParent)
 _G.GameTooltip = _G.CreateFrame("GameTooltip", "GameTooltip")
 _G.AuctionFrame = _G.CreateFrame("Frame", "AuctionFrame", _G.UIParent)
 _G.BrowseName = _G.CreateFrame("EditBox", "BrowseName", _G.AuctionFrame)

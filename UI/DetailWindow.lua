@@ -383,6 +383,32 @@ local function EnsureDetailFrame()
         detailFrame:Hide()
     end)
 
+    local snoozeBtn = CreateFrame("Button", "PF_DetailSnoozeButton", detailFrame, "UIPanelButtonTemplate")
+    if snoozeBtn.SetSize then snoozeBtn:SetSize(84, 20) end
+    if snoozeBtn.SetPoint then snoozeBtn:SetPoint("TOPRIGHT", detailFrame, "TOPRIGHT", -32, -8) end
+    if snoozeBtn.SetText then snoozeBtn:SetText("Snooze 24h") end
+    snoozeBtn:SetScript("OnClick", function()
+        if not currentOpportunity then return end
+        local isPerm = (_G.IsShiftKeyDown and _G.IsShiftKeyDown()) == true
+        if PF.SideWindow and PF.SideWindow.SnoozeOpportunity then
+            PF.SideWindow.SnoozeOpportunity(currentOpportunity, isPerm)
+        elseif PF.SnoozePlay then
+            PF.SnoozePlay(currentOpportunity, isPerm and 0 or nil, isPerm and "permanent" or "manual")
+        end
+        detailFrame:Hide()
+    end)
+    snoozeBtn:SetScript("OnEnter", function(self)
+        if not _G.GameTooltip then return end
+        _G.GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        _G.GameTooltip:AddLine("Snooze / Hide This Play", 0, 1, 0.5)
+        _G.GameTooltip:AddLine("Click: Hide this play for 24 hours so another opportunity rotates into your Top 5.", 1, 1, 1, true)
+        _G.GameTooltip:AddLine("Shift-Click: Hide permanently (restore anytime in Options -> Snoozed Plays).", 0.7, 0.85, 1, true)
+        _G.GameTooltip:Show()
+    end)
+    snoozeBtn:SetScript("OnLeave", function()
+        if _G.GameTooltip then _G.GameTooltip:Hide() end
+    end)
+
     -- Target Item Clickable Title Button
     local titleBtn = CreateFrame("Button", "PF_DetailTargetItemButton", detailFrame)
     if titleBtn.SetSize then titleBtn:SetSize(446, 24) end
@@ -583,6 +609,7 @@ local function EnsureDetailFrame()
     detailFrame.craftFinalBtn = craftFinalBtn
     detailFrame.searchTargetBtn = searchTargetBtn
     detailFrame.refreshBtn = refreshBtn
+    detailFrame.snoozeBtn = snoozeBtn
     detailFrame.shoppingRows = shoppingRows
 
     detailFrame:Hide()

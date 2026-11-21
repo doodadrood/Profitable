@@ -45,16 +45,44 @@ function PF.OpportunityEngine.ResolveAHPrice(itemId, itemLink)
         end
     end
 
-    -- 2. Compare PCF_DB.prices and optional Profitable_MarketFeed (prefer whichever is fresher)
+    -- 2. Resolve according to configured Price Source mode ("AUTO" | "PCF" | "AUCTIONATOR")
+    local mode = (PF.GetPriceSourceMode and PF.GetPriceSourceMode()) or "AUTO"
+
+    if mode == "AUCTIONATOR" then
+        if PF.AuctionatorSource and PF.AuctionatorSource.GetItemData then
+            local atr = PF.AuctionatorSource.GetItemData(itemId, itemLink)
+            if atr and atr.minBuyout and atr.minBuyout > 0 then
+                return atr.minBuyout, math.max(1, atr.count or 1), atr.source or "Auctionator"
+            end
+        end
+        return nil, 0, nil
+    end
+
     local pcfEntry = (_G.PCF_DB and type(_G.PCF_DB.prices) == "table") and _G.PCF_DB.prices[itemId] or nil
     local pcfValid = pcfEntry and pcfEntry.minBuyout and pcfEntry.minBuyout > 0
-    local pcfTs = (pcfValid and pcfEntry.lastUpdated) or 0
+    local pcfTs = (pcfValid and tonumber(pcfEntry.lastUpdated)) or 0
 
     local feedData = (PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh())
         and PF.MarketFeed.GetItemData(itemId)
         or nil
+    local feedTs = (feedData and tonumber(feedData.timestamp)) or 0
 
-    if feedData and (not pcfValid or feedData.timestamp > pcfTs) then
+    local atrData = nil
+    local atrTs = 0
+    if mode == "AUTO" and PF.AuctionatorSource and PF.AuctionatorSource.GetItemData then
+        atrData = PF.AuctionatorSource.GetItemData(itemId, itemLink)
+        atrTs = (atrData and tonumber(atrData.timestamp)) or 0
+    end
+
+    if mode == "AUTO" and atrData and atrData.minBuyout and atrData.minBuyout > 0 then
+        local atrBeatsPCF = (not pcfValid) or (atrTs > pcfTs)
+        local atrBeatsFeed = (not feedData) or (atrTs > feedTs)
+        if atrBeatsPCF and atrBeatsFeed then
+            return atrData.minBuyout, math.max(1, atrData.count or 1), atrData.source or "Auctionator"
+        end
+    end
+
+    if feedData and (not pcfValid or feedTs > pcfTs) then
         return feedData.minBuyout, feedData.totalQuantity, "API Feed"
     end
 
@@ -64,7 +92,7 @@ function PF.OpportunityEngine.ResolveAHPrice(itemId, itemLink)
     end
 
     -- 3. Fallback to PCF.ProviderRegistry.ResolveAHPrice (TSM / Auctionator)
-    if _G.PCF and _G.PCF.ProviderRegistry and _G.PCF.ProviderRegistry.ResolveAHPrice then
+    if mode ~= "PCF" and _G.PCF and _G.PCF.ProviderRegistry and _G.PCF.ProviderRegistry.ResolveAHPrice then
         local ok, ahPrice, ahSource = pcall(_G.PCF.ProviderRegistry.ResolveAHPrice, itemLink, itemId)
         if ok and type(ahPrice) == "number" and ahPrice > 0 then
             local count = (_G.PCF_DB and _G.PCF_DB.prices and _G.PCF_DB.prices[itemId] and _G.PCF_DB.prices[itemId].count) or 20
@@ -96,7 +124,8 @@ function PF.OpportunityEngine.GetOrderBook(itemId, customOrderBooks)
         end
     end
 
-    if not rawListings and PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh() then
+    local mode = (PF.GetPriceSourceMode and PF.GetPriceSourceMode()) or "AUTO"
+    if not rawListings and mode ~= "AUCTIONATOR" and PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh() then
         local feedListings, feedTs = PF.MarketFeed.GetOrderBook(itemId)
         local pcfEntry = (_G.PCF_DB and type(_G.PCF_DB.prices) == "table") and _G.PCF_DB.prices[itemId] or nil
         local pcfTs = (pcfEntry and pcfEntry.lastUpdated) or 0
@@ -1205,19 +1234,30 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
         return isSpiked and info or nil
     end
 
+    if PF.PruneExpiredSnoozes then
+        PF.PruneExpiredSnoozes()
+    end
+    local isSnoozed = PF.IsPlaySnoozed
+    local mode = (PF.GetPriceSourceMode and PF.GetPriceSourceMode()) or "AUTO"
+
     local candidates = {}
 
-    -- 1. Scan all known AH items (PCF_DB + optional MarketFeed) for direct VENDOR and BUY_DE plays
+    -- 1. Scan all known AH items (PCF_DB + optional MarketFeed + Auctionator) for direct VENDOR and BUY_DE plays
     local candidateItemIds = {}
-    if _G.PCF_DB and type(_G.PCF_DB.prices) == "table" then
-        for itemId, entry in pairs(_G.PCF_DB.prices) do
-            if type(itemId) == "number" and itemId > 0 and entry and entry.minBuyout and entry.minBuyout > 0 then
-                candidateItemIds[itemId] = true
+    if mode ~= "AUCTIONATOR" then
+        if _G.PCF_DB and type(_G.PCF_DB.prices) == "table" then
+            for itemId, entry in pairs(_G.PCF_DB.prices) do
+                if type(itemId) == "number" and itemId > 0 and entry and entry.minBuyout and entry.minBuyout > 0 then
+                    candidateItemIds[itemId] = true
+                end
             end
         end
+        if PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh() and PF.MarketFeed.CollectAllItemIds then
+            PF.MarketFeed.CollectAllItemIds(candidateItemIds)
+        end
     end
-    if PF.MarketFeed and PF.MarketFeed.IsFresh and PF.MarketFeed.IsFresh() and PF.MarketFeed.CollectAllItemIds then
-        PF.MarketFeed.CollectAllItemIds(candidateItemIds)
+    if mode ~= "PCF" and PF.AuctionatorSource and PF.AuctionatorSource.CollectAllItemIds then
+        PF.AuctionatorSource.CollectAllItemIds(candidateItemIds)
     end
 
     for itemId in pairs(candidateItemIds) do
@@ -1236,7 +1276,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
 
             -- Strategy A: Direct AH Buy -> Vendor
             if allowVendorPlays and vendorSell and vendorSell > minBuyout then
-                table.insert(candidates, {
+                local vendorCand = {
                     actionType = "VENDOR",
                     itemId = itemId,
                     itemName = itemName,
@@ -1249,7 +1289,10 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                     rawReagents = {
                         { itemId = itemId, name = itemName, count = 1 },
                     },
-                })
+                }
+                if not (isSnoozed and isSnoozed(vendorCand)) then
+                    table.insert(candidates, vendorCand)
+                end
             end
 
             -- Strategy B: Direct AH Buy -> Disenchant (fast pre-check skips ~85% of non-gear items before CanDisenchant)
@@ -1261,7 +1304,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                     if deEval and deEval.netValue > minBuyout then
                         if not vendorSell or deEval.netValue > vendorSell then
                             local isShard = deEval.isShardOrCrystal == true
-                            table.insert(candidates, {
+                            local deCand = {
                                 actionType = "BUY_DE",
                                 itemId = itemId,
                                 itemName = itemName,
@@ -1276,7 +1319,10 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                                 rawReagents = {
                                     { itemId = itemId, name = itemName, count = 1 },
                                 },
-                            })
+                            }
+                            if not (isSnoozed and isSnoozed(deCand)) then
+                                table.insert(candidates, deCand)
+                            end
                         end
                     end
                 end
@@ -1288,7 +1334,8 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
     local recipes = (allowCraftPlays or allowDEPlays) and PF.RecipeScanner and PF.RecipeScanner.GetKnownRecipes() or {}
     for _, recipe in ipairs(recipes) do
         local outId = recipe.outputItemId
-        if outId and outId > 0 and type(recipe.reagents) == "table" and #recipe.reagents > 0 then
+        if outId and outId > 0 and type(recipe.reagents) == "table" and #recipe.reagents > 0
+            and not (isSnoozed and isSnoozed({ actionType = "CRAFT_AH", itemId = outId })) then
             local avgMade = (recipe.avgMade and recipe.avgMade > 0) and recipe.avgMade or 1
             local meta = PF.VendorDatabase.GetItemMetadata(outId, recipe.outputLink)
             local itemName = recipe.name or (meta and meta.name) or string.format("Item #%d", outId)
@@ -1457,7 +1504,7 @@ function PF.OpportunityEngine.FindTopOpportunities(budgetOverride, customOrderBo
 
     for _, opp in ipairs(allEvaluated) do
         local key = opp.endResultKey or opp.id
-        if not usedEndResultKeys[key] and #results < topLimit then
+        if not (PF.IsPlaySnoozed and PF.IsPlaySnoozed(opp)) and not usedEndResultKeys[key] and #results < topLimit then
             usedEndResultKeys[key] = true
             usedPlayIds[opp.id] = true
             opp.rank = #results + 1
@@ -1475,14 +1522,16 @@ function PF.OpportunityEngine.FindTopOpportunities(budgetOverride, customOrderBo
     local bestVendorHM = nil
 
     for _, opp in ipairs(allEvaluated) do
-        local isCraft = (opp.actionType == "CRAFT_AH" or opp.actionType == "CRAFT_VENDOR" or opp.actionType == "CRAFT_DE")
-        local isVendor = (opp.actionType == "VENDOR" or opp.actionType == "CRAFT_VENDOR")
+        if not (PF.IsPlaySnoozed and PF.IsPlaySnoozed(opp)) then
+            local isCraft = (opp.actionType == "CRAFT_AH" or opp.actionType == "CRAFT_VENDOR" or opp.actionType == "CRAFT_DE")
+            local isVendor = (opp.actionType == "VENDOR" or opp.actionType == "CRAFT_VENDOR")
 
-        if isCraft and not usedPlayIds[opp.id] and not bestCraftHM then
-            bestCraftHM = opp
-        end
-        if isVendor and not usedPlayIds[opp.id] and (not bestCraftHM or opp.id ~= bestCraftHM.id) and not bestVendorHM then
-            bestVendorHM = opp
+            if isCraft and not usedPlayIds[opp.id] and not bestCraftHM then
+                bestCraftHM = opp
+            end
+            if isVendor and not usedPlayIds[opp.id] and (not bestCraftHM or opp.id ~= bestCraftHM.id) and not bestVendorHM then
+                bestVendorHM = opp
+            end
         end
     end
 
