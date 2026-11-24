@@ -257,20 +257,21 @@ function PF.PruneExpiredSnoozes(nowOverride)
 end
 
 function PF.IsPlaySnoozed(oppOrCandidate, nowOverride)
-    if not Profitable_DB or type(Profitable_DB.snoozedPlays) ~= "table" then
+    local snoozed = Profitable_DB and Profitable_DB.snoozedPlays
+    if type(snoozed) ~= "table" or next(snoozed) == nil then
         return false, nil
     end
     local key = PF.GetSnoozeKey(oppOrCandidate)
     if not key then
         return false, nil
     end
-    local entry = Profitable_DB.snoozedPlays[key]
+    local entry = snoozed[key]
     if type(entry) ~= "table" then
         return false, nil
     end
     local now = (type(nowOverride) == "number") and nowOverride or ((_G.time and _G.time()) or 0)
     if type(entry.expiresAt) == "number" and entry.expiresAt > 0 and now >= entry.expiresAt then
-        Profitable_DB.snoozedPlays[key] = nil
+        snoozed[key] = nil
         return false, nil
     end
     return true, entry
@@ -407,20 +408,84 @@ function PF.GetActiveSnoozedPlays(nowOverride)
     return list
 end
 
+local ahStatusCache = nil
+
+function PF.InvalidateAHStatusCache()
+    ahStatusCache = nil
+end
+
 -- Evaluates whether Auction House price data is available and fresh.
 -- Respects Profitable_DB.settings.priceSource ("AUTO" | "PCF" | "AUCTIONATOR").
+-- Memoizes full-table counts across same-frame/short-window UI refreshes.
 -- Returns: status ("NO_DATA" | "STALE" | "FRESH"), detailsTable
 function PF.GetAHDataStatus()
     local now = (_G.time and _G.time()) or 0
     local threshold = (Profitable_DB and Profitable_DB.settings and tonumber(Profitable_DB.settings.staleDataThresholdSeconds)) or 86400
     local mode = PF.GetPriceSourceMode()
 
+    local pcfPrices = (mode ~= "AUCTIONATOR" and _G.PCF_DB and type(_G.PCF_DB.prices) == "table") and _G.PCF_DB.prices or nil
+    local pcfEmpty = (not pcfPrices) or (next(pcfPrices) == nil)
+    local lastScanTs = 0
+    if mode ~= "AUCTIONATOR" and _G.PCF_DB then
+        local fullTs = tonumber(_G.PCF_DB.lastFullScan) or 0
+        local repTs = tonumber(_G.PCF_DB.lastReplicateScan) or 0
+        lastScanTs = math.max(fullTs, repTs)
+    end
+
+    local feed = (mode ~= "AUCTIONATOR" and PF.MarketFeed and PF.MarketFeed.GetFeedTable and PF.MarketFeed.GetFeedTable()) or nil
+    local feedItemsTbl = (feed and type(feed.items) == "table") and feed.items or nil
+    local feedEmpty = (not feedItemsTbl) or (next(feedItemsTbl) == nil)
+    local feedTs = (feedItemsTbl and tonumber(feed.timestamp)) or 0
+
+    local atrPriceTable = (mode ~= "PCF" and PF.AuctionatorSource and PF.AuctionatorSource.GetRealmPriceTable and PF.AuctionatorSource.GetRealmPriceTable()) or nil
+    local atrEmpty = (not atrPriceTable) or (next(atrPriceTable) == nil)
+    local atrScanTs = (mode ~= "PCF" and PF.AuctionatorSource and PF.AuctionatorSource.GetLastScanTimestamp and PF.AuctionatorSource.GetLastScanTimestamp()) or 0
+    local atrRev = (PF.AuctionatorSource and PF.AuctionatorSource.GetCacheRevision and PF.AuctionatorSource.GetCacheRevision()) or 0
+
+    if ahStatusCache
+        and math.abs(now - ahStatusCache.computedAt) < 2
+        and ahStatusCache.mode == mode
+        and ahStatusCache.threshold == threshold
+        and ahStatusCache.pcfPrices == pcfPrices
+        and ahStatusCache.pcfEmpty == pcfEmpty
+        and ahStatusCache.lastScanTs == lastScanTs
+        and ahStatusCache.feedItemsTbl == feedItemsTbl
+        and ahStatusCache.feedEmpty == feedEmpty
+        and ahStatusCache.feedTs == feedTs
+        and ahStatusCache.atrPriceTable == atrPriceTable
+        and ahStatusCache.atrEmpty == atrEmpty
+        and ahStatusCache.atrScanTs == atrScanTs
+        and ahStatusCache.atrRev == atrRev then
+        return ahStatusCache.status, ahStatusCache.info
+    end
+
+    local function CacheAndReturn(status, info)
+        ahStatusCache = {
+            status = status,
+            info = info,
+            computedAt = now,
+            mode = mode,
+            threshold = threshold,
+            pcfPrices = pcfPrices,
+            pcfEmpty = pcfEmpty,
+            lastScanTs = lastScanTs,
+            feedItemsTbl = feedItemsTbl,
+            feedEmpty = feedEmpty,
+            feedTs = feedTs,
+            atrPriceTable = atrPriceTable,
+            atrEmpty = atrEmpty,
+            atrScanTs = atrScanTs,
+            atrRev = atrRev,
+        }
+        return status, info
+    end
+
     local pcfItems = 0
     local newestEntryTs = 0
     local hasUntimestampedPCF = false
 
-    if mode ~= "AUCTIONATOR" and _G.PCF_DB and type(_G.PCF_DB.prices) == "table" then
-        for itemId, entry in pairs(_G.PCF_DB.prices) do
+    if pcfPrices and not pcfEmpty then
+        for itemId, entry in pairs(pcfPrices) do
             if type(itemId) == "number" and itemId > 0 and type(entry) == "table" and entry.minBuyout and entry.minBuyout > 0 then
                 pcfItems = pcfItems + 1
                 local ts = tonumber(entry.lastUpdated) or 0
@@ -433,23 +498,11 @@ function PF.GetAHDataStatus()
         end
     end
 
-    local lastScanTs = 0
-    if mode ~= "AUCTIONATOR" and _G.PCF_DB then
-        local fullTs = tonumber(_G.PCF_DB.lastFullScan) or 0
-        local repTs = tonumber(_G.PCF_DB.lastReplicateScan) or 0
-        lastScanTs = math.max(fullTs, repTs)
-    end
-
     local feedItems = 0
-    local feedTs = 0
-    if mode ~= "AUCTIONATOR" and PF.MarketFeed and PF.MarketFeed.GetFeedTable then
-        local feed = PF.MarketFeed.GetFeedTable()
-        if feed and type(feed.items) == "table" then
-            feedTs = tonumber(feed.timestamp) or 0
-            for itemId, row in pairs(feed.items) do
-                if type(itemId) == "number" and itemId > 0 and type(row) == "table" and row.m and row.m > 0 then
-                    feedItems = feedItems + 1
-                end
+    if feedItemsTbl and not feedEmpty then
+        for itemId, row in pairs(feedItemsTbl) do
+            if type(itemId) == "number" and itemId > 0 and type(row) == "table" and row.m and row.m > 0 then
+                feedItems = feedItems + 1
             end
         end
     end
@@ -497,7 +550,7 @@ function PF.GetAHDataStatus()
     end
 
     if totalItems <= 0 then
-        return "NO_DATA", {
+        return CacheAndReturn("NO_DATA", {
             status = "NO_DATA",
             itemCount = 0,
             pcfItems = 0,
@@ -508,11 +561,11 @@ function PF.GetAHDataStatus()
             lastScanTimestamp = 0,
             ageSeconds = nil,
             ageText = "never",
-        }
+        })
     end
 
     if bestTs <= 0 and hasUntimestampedEntry then
-        return "FRESH", {
+        return CacheAndReturn("FRESH", {
             status = "FRESH",
             itemCount = totalItems,
             pcfItems = pcfItems,
@@ -523,14 +576,14 @@ function PF.GetAHDataStatus()
             lastScanTimestamp = now,
             ageSeconds = 0,
             ageText = "0m",
-        }
+        })
     end
 
     local ageSeconds = math.max(0, now - bestTs)
     local ageText = PF.FormatAgeShort(ageSeconds)
     local status = (ageSeconds > threshold) and "STALE" or "FRESH"
 
-    return status, {
+    return CacheAndReturn(status, {
         status = status,
         itemCount = totalItems,
         pcfItems = pcfItems,
@@ -541,10 +594,17 @@ function PF.GetAHDataStatus()
         lastScanTimestamp = bestTs,
         ageSeconds = ageSeconds,
         ageText = ageText,
-    }
+    })
 end
 
 function PF.LoadConfig(customDB)
+    PF.InvalidateAHStatusCache()
+    if PF.RecipeScanner and PF.RecipeScanner.InvalidateCache then
+        PF.RecipeScanner.InvalidateCache()
+    end
+    if PF.AHVerifier and PF.AHVerifier.InvalidateEvaluatedPool then
+        PF.AHVerifier.InvalidateEvaluatedPool()
+    end
     if type(customDB) == "table" then
         Profitable_DB = customDB
     else

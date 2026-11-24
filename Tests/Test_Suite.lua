@@ -3331,4 +3331,249 @@ do
     PF.LoadConfig(origDB32)
 end
 
+-- =============================================================================
+-- 33. Snooze / Unsnooze Fast-Path Performance, O(1) Auctionator Suffixed-Gear
+--     Indexing, Batch Recipe Lookup, and Zero-Rescan UI Refresh Regressions
+-- =============================================================================
+do
+    local origDB33 = _G.Profitable_DB
+    local origPCF33 = _G.PCF_DB
+    local origAtr33 = _G.Auctionator
+    local origAtrDB33 = _G.AUCTIONATOR_PRICE_DATABASE
+    local origCTSU33 = _G.C_TradeSkillUI
+    local origShift33 = _G.IsShiftKeyDown
+    local origBagCounts33 = Mock.bagCounts
+
+    local charKey33 = PF.GetCharacterKey()
+    local now33 = math.floor(Mock.currentTime)
+
+    -- Build a realistic 15,000-entry Auctionator + PCF dataset (including 3,000 suffixed "g:<id>:..." gear keys)
+    local largeAtrDB = {}
+    local largePCFPrices = {}
+    local itemCache33 = {}
+
+    for i = 1, 12000 do
+        local id = 200000 + i
+        largeAtrDB[tostring(id)] = { m = 50000, a = { ["100"] = 10 } }
+        largePCFPrices[id] = { minBuyout = 52000, count = 10, lastUpdated = now33 - 300, source = "Scan" }
+    end
+    for i = 1, 3000 do
+        local gearId = 300000 + i
+        largeAtrDB[string.format("g:%d:0:1200", gearId)] = { m = 95000, a = { ["100"] = 2 } }
+        largeAtrDB[string.format("gr:%d:15:1200", gearId)] = { m = 90000, a = { ["100"] = 1 } }
+    end
+
+    -- Add 8 distinct profitable vendor/craft plays so Top 5 + reserves (#6, #7, #8) + Honorable Mentions rotate cleanly
+    local charRecipes33 = {}
+    for idx = 1, 8 do
+        local outId = 410000 + idx
+        local regId = 420000 + idx
+        itemCache33[outId] = {
+            name = "Perf Crafted Play #" .. idx,
+            quality = 2,
+            itemLevel = 35,
+            classID = 7,
+            vendorSell = 100,
+        }
+        itemCache33[regId] = {
+            name = "Perf Reagent #" .. idx,
+            quality = 1,
+            itemLevel = 20,
+            classID = 7,
+            vendorSell = 10,
+        }
+        -- Reagent costs 10s, crafted item sells for (100 - idx*5)s on AH -> strictly descending profit #1..#8
+        largeAtrDB[tostring(regId)] = { m = 1000, a = { ["100"] = 100 } }
+        largeAtrDB[tostring(outId)] = { m = (100 - (idx * 5)) * 100, a = { ["100"] = 20 } }
+        charRecipes33["Perf:" .. idx] = {
+            name = "Perf Crafted Play #" .. idx,
+            profession = "Blacksmithing",
+            professionId = 164,
+            recipeId = 510000 + idx,
+            outputItemId = outId,
+            avgMade = 1,
+            reagents = {
+                { itemId = regId, name = "Perf Reagent #" .. idx, count = 2 },
+                { itemId = 3860, name = "Mithril Bar", count = 1 }, -- Triggers GetIntermediateRecipeForItem!
+            },
+        }
+    end
+    -- Include Mithril Ore / Bar prices for intermediate conversion evaluation
+    itemCache33[3860] = { name = "Mithril Bar", quality = 1, itemLevel = 35, classID = 7, vendorSell = 400 }
+    itemCache33[3858] = { name = "Mithril Ore", quality = 1, itemLevel = 35, classID = 7, vendorSell = 250 }
+    largeAtrDB["3860"] = { m = 1200, a = { ["100"] = 200 } }
+    largeAtrDB["3858"] = { m = 900,  a = { ["100"] = 200 } }
+
+    -- Also add a suffixed gear item in Auctionator ("gr:5541:...") to verify O(1) gearBestByItemId resolution
+    itemCache33[5541] = { name = "Iridescent Hammer", quality = 2, itemLevel = 28, classID = 2, invType = "INVTYPE_WEAPON", vendorSell = 20000 }
+    largeAtrDB["g:5541:0:100"] = { m = 8000, a = { ["100"] = 2 } }
+    largeAtrDB["gr:5541:12:100"] = { m = 5000, a = { ["100"] = 3 } } -- Cheapest suffixed gear listing = 50s (< 2g vendor!)
+
+    -- Mock an open 250-recipe C_TradeSkillUI window to verify GetKnownRecipes / Snooze NEVER re-scans TradeSkill UI
+    local getAllRecipeIDsCalls = 0
+    local mockRecipeIds = {}
+    for i = 1, 250 do mockRecipeIds[i] = 600000 + i end
+    _G.C_TradeSkillUI = {
+        IsTradeSkillReady = function() return true end,
+        GetAllRecipeIDs = function()
+            getAllRecipeIDsCalls = getAllRecipeIDsCalls + 1
+            return mockRecipeIds
+        end,
+        GetRecipeInfo = function(id)
+            return { recipeID = id, name = "Mock Recipe " .. id, learned = true, itemID = id }
+        end,
+    }
+
+    _G.PCF_DB = { prices = largePCFPrices, lastFullScan = now33 - 300, settings = { showScanButton = true } }
+    _G.AUCTIONATOR_PRICE_DATABASE = { __dbversion = 7, ["Forever Alliance"] = largeAtrDB }
+    _G.Auctionator = {
+        SavedState = { TimeOfLastFullScan = now33 - 30 },
+        Database = { db = largeAtrDB },
+        API = {
+            v1 = {
+                GetAuctionPriceByItemID = function(_, id)
+                    local r = largeAtrDB[tostring(id)]
+                    return r and r.m or nil
+                end,
+                GetAuctionAgeByItemID = function(_, id)
+                    return largeAtrDB[tostring(id)] and 0 or nil
+                end,
+            },
+        },
+    }
+
+    local db33 = {
+        version = 4,
+        settings = {
+            onboardingDismissed = true,
+            includeSkillMatchedBaselineRecipes = false,
+            includeTrainerRecommendations = false,
+            assumeCanDisenchant = false,
+            showCraftPlays = true,
+            showVendorPlays = true,
+            showSideWindow = true,
+            autoSnoozeOnCraft = true,
+            priceSource = "AUTO",
+        },
+        charRecipes = { [charKey33] = charRecipes33 },
+        itemCache = itemCache33,
+        orderBookCache = {},
+        snoozedPlays = {},
+        lastTopPlays = {},
+        lastHonorableMentions = {},
+    }
+    PF.LoadConfig(db33)
+    PF.AuctionatorSource.InvalidateCache()
+    Mock.bagCounts = { [420006] = 7 } -- Pre-populate 7x Perf Reagent #6 in bags to test lazy inventory computation on rotation!
+
+    -- 33A. Verify suffixed gear ("gr:5541:...") resolves minimum buyout (5000c) in O(1) and full 15,000-item scan is fast
+    local hammerAtr = PF.AuctionatorSource.GetItemData(5541)
+    Assert(hammerAtr ~= nil and hammerAtr.minBuyout == 5000 and hammerAtr.count == 3,
+        "Indexed AuctionatorSource resolves lowest suffixed gear entry (gr:5541 -> 50s, qty 3) in O(1)")
+
+    local t0Scan = os.clock()
+    PF.AHVerifier.RecalculateFromCache()
+    PF.SideWindow.frame:Show()
+    PF.SideWindow.Refresh()
+    local fullScanMs = (os.clock() - t0Scan) * 1000
+
+    Assert(getAllRecipeIDsCalls == 0,
+        "RecalculateFromCache and SideWindow.Refresh NEVER trigger C_TradeSkillUI.GetAllRecipeIDs re-scans")
+    Assert(#Profitable_DB.lastTopPlays == 5,
+        "Full 15,000-item calculation populates Top 5 plays")
+    Assert(fullScanMs < 500,
+        string.format("Full 15,000-item PCF+Auctionator calculation completes in <500ms (actual: %.2fms)", fullScanMs))
+
+    -- 33B. Spy on FindTopOpportunities and DetailWindow.RefreshIfShown during Snooze / Unsnooze / Craft Auto-Snooze
+    local findTopCalls33 = 0
+    local origFindTop33 = PF.OpportunityEngine.FindTopOpportunities
+    PF.OpportunityEngine.FindTopOpportunities = function(...)
+        findTopCalls33 = findTopCalls33 + 1
+        return origFindTop33(...)
+    end
+
+    _G.IsShiftKeyDown = function() return false end
+    local t0Snooze = os.clock()
+
+    -- Snooze #1..#4 sequentially via UI buttons -> #6, #7, #8 rotate into Top 5 with ZERO FindTopOpportunities calls!
+    local firstId = Profitable_DB.lastTopPlays[1].itemId
+    _G["PF_SideWindowPlayButton1_Snooze"]:Click("LeftButton")
+    Assert(findTopCalls33 == 0, "Clicking Row 1 'x' snooze rotates Top 5 with ZERO FindTopOpportunities() calls")
+    Assert(#Profitable_DB.lastTopPlays == 5 and Profitable_DB.lastTopPlays[1].itemId ~= firstId,
+        "Snoozing #1 immediately promotes reserve play #6 into Top 5")
+    Assert(Profitable_DB.lastTopPlays[1].summaryLine:find("^1%.") ~= nil
+        and Profitable_DB.lastTopPlays[5].summaryLine:find("^5%.") ~= nil,
+        "Fast-path snooze rotation renumbers ranks 1..5 cleanly")
+
+    -- Snooze via Right-Click
+    _G["PF_SideWindowPlayButton1"]:Click("RightButton")
+    Assert(findTopCalls33 == 0 and #Profitable_DB.lastTopPlays == 5,
+        "Right-Click snooze rotates reserve play #7 into Top 5 with ZERO FindTopOpportunities() calls")
+
+    -- Snooze via DetailWindow 'Snooze 24h' button -> hides DetailWindow BEFORE snoozing (zero wasted DetailWindow redraw)
+    PF.DetailWindow.ShowOpportunity(Profitable_DB.lastTopPlays[1])
+    local detailRefreshDuringSnooze = 0
+    local origDetailRefresh33 = PF.DetailWindow.RefreshIfShown
+    PF.DetailWindow.RefreshIfShown = function(...)
+        if PF.DetailWindow.frame and PF.DetailWindow.frame:IsShown() then
+            detailRefreshDuringSnooze = detailRefreshDuringSnooze + 1
+        end
+        return origDetailRefresh33(...)
+    end
+    PF.DetailWindow.frame.snoozeBtn:Click("LeftButton")
+    PF.DetailWindow.RefreshIfShown = origDetailRefresh33
+    Assert(detailRefreshDuringSnooze == 0 and not PF.DetailWindow.frame:IsShown(),
+        "DetailWindow 'Snooze 24h' hides window before snooze update so DetailWindow is not wastefully redrawn")
+    Assert(findTopCalls33 == 0, "DetailWindow 'Snooze 24h' uses O(M) fast path with ZERO FindTopOpportunities() calls")
+
+    -- Auto-snooze on craft (12h) while C_TradeSkillUI has 250 recipes open -> ZERO FindTopOpportunities & ZERO TradeSkill scans!
+    local craftTarget = Profitable_DB.lastTopPlays[1]
+    PF.RecipeScanner.frame:Trigger("TRADE_SKILL_ITEM_CRAFTED_RESULT", { itemID = craftTarget.itemId })
+    Assert(findTopCalls33 == 0 and getAllRecipeIDsCalls == 0,
+        "Auto-snooze on craft rotates plays with ZERO FindTopOpportunities() and ZERO TradeSkill UI scans")
+
+    -- Verify promoted reserve play (410006) lazily computed live bag inventory (7x Perf Reagent #6 in bags)
+    local promotedPlay6 = nil
+    for _, p in ipairs(Profitable_DB.lastTopPlays) do
+        if p.itemId == 410006 then promotedPlay6 = p end
+    end
+    if promotedPlay6 then
+        local reg6Shop = nil
+        for _, s in ipairs(promotedPlay6.shoppingList or {}) do
+            if s.itemId == 420006 then reg6Shop = s end
+        end
+        Assert(reg6Shop ~= nil and reg6Shop.haveInBags == 7,
+            "Reserve play promoted during fast-path snooze rotation lazily computes exact live bag counts (7 in bags)")
+    end
+
+    -- Unsnooze individual play via Snoozed Window button AND '/pf unhide all' -> BOTH use O(M) fast path!
+    PF.SideWindow.ToggleSnoozedWindow()
+    local snoozeRow1Btn = _G["PF_SnoozedRow1"] and _G["PF_SnoozedRow1"].unhideBtn
+    Assert(snoozeRow1Btn ~= nil, "Snoozed window row 1 unhide button exists")
+    snoozeRow1Btn:Click("LeftButton")
+    Assert(findTopCalls33 == 0, "Clicking 'Unhide' in Snoozed Plays window restores play with ZERO FindTopOpportunities() calls")
+
+    SlashCmdList["PROFITABLE"]("unhide all")
+    local totalSnoozeCycleMs = (os.clock() - t0Snooze) * 1000
+    Assert(findTopCalls33 == 0 and #PF.GetActiveSnoozedPlays() == 0 and Profitable_DB.lastTopPlays[1].itemId == firstId,
+        "'/pf unhide all' restores original #1 play in O(M) with ZERO FindTopOpportunities() calls")
+    Assert(totalSnoozeCycleMs < 25,
+        string.format("Entire 6-action Snooze/Auto-Snooze/Unhide cycle on 15,000-item DB completes in <25ms (actual: %.2fms)", totalSnoozeCycleMs))
+
+    -- 33C. Changing budget or filter settings invalidates the pool signature and triggers a fresh calculation
+    SlashCmdList["PROFITABLE"]("budget 5g")
+    Assert(findTopCalls33 == 1, "Changing spending budget invalidates cached pool and recalculates cleanly")
+
+    -- Restore globals cleanly
+    PF.OpportunityEngine.FindTopOpportunities = origFindTop33
+    Mock.bagCounts = origBagCounts33
+    _G.IsShiftKeyDown = origShift33
+    _G.C_TradeSkillUI = origCTSU33
+    _G.Auctionator = origAtr33
+    _G.AUCTIONATOR_PRICE_DATABASE = origAtrDB33
+    _G.PCF_DB = origPCF33
+    _G.Profitable_DB = origDB33
+    PF.LoadConfig(origDB33)
+end
+
 print("\nAll Profitable test assertions passed successfully!")

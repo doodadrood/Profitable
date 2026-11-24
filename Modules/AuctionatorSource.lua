@@ -5,6 +5,28 @@ _G.Profitable = PF
 PF.AuctionatorSource = {}
 
 local dbUpdateRegistered = false
+local atrCacheRevision = 0
+local realmIndexCache = {
+    tableRef = nil,
+    lastScanTs = -1,
+    isEmpty = true,
+    revision = -1,
+    gearBestByItemId = {},
+    itemIds = {},
+    itemCount = 0,
+}
+
+function PF.AuctionatorSource.InvalidateCache()
+    atrCacheRevision = atrCacheRevision + 1
+    realmIndexCache.tableRef = nil
+    if PF.InvalidateAHStatusCache then
+        PF.InvalidateAHStatusCache()
+    end
+end
+
+function PF.AuctionatorSource.GetCacheRevision()
+    return atrCacheRevision
+end
 
 local function GetAuctionatorSavedState()
     if _G.Auctionator and type(_G.Auctionator.SavedState) == "table" then
@@ -133,29 +155,91 @@ local function ExtractLatestAvailableCount(entry)
     return count
 end
 
-local function FindRawDBEntry(priceTable, itemId)
-    if type(priceTable) ~= "table" or not itemId then
+local function ParseItemIdFromAuctionatorKey(key)
+    if type(key) == "number" then
+        if key > 0 and key == math.floor(key) then
+            return key
+        end
         return nil
     end
-    local strKey = tostring(itemId)
-    local direct = priceTable[strKey] or priceTable[itemId]
-    if type(direct) == "table" then
-        return direct
+    if type(key) ~= "string" then
+        return nil
     end
-    -- Also check suffixed gear keys (e.g., "g:5541:..." or "gr:5541:...") if no plain key exists
-    local prefixG = "g:" .. strKey .. ":"
-    local prefixGR = "gr:" .. strKey .. ":"
-    local best = nil
+    local plain = tonumber(key)
+    if plain and plain > 0 and plain == math.floor(plain) then
+        return plain
+    end
+    -- Skip Battle Pets ("p:...")
+    if key:sub(1, 2) == "p:" then
+        return nil
+    end
+    local gearId = key:match("^gr?:(%d+)")
+    if gearId then
+        local num = tonumber(gearId)
+        if num and num > 0 then
+            return num
+        end
+    end
+    return nil
+end
+
+-- Builds a single O(N) lookup index per Auctionator scan / DB update so per-item lookups,
+-- suffixed gear ("g:<id>:..." / "gr:<id>:...") resolution, and item counts run in O(1).
+local function EnsureRealmIndex(priceTable)
+    if type(priceTable) ~= "table" then
+        return nil
+    end
+    local lastScanTs = PF.AuctionatorSource.GetLastScanTimestamp()
+    local isEmpty = (next(priceTable) == nil)
+    if realmIndexCache.tableRef == priceTable
+        and realmIndexCache.lastScanTs == lastScanTs
+        and realmIndexCache.isEmpty == isEmpty
+        and realmIndexCache.revision == atrCacheRevision then
+        return realmIndexCache
+    end
+
+    local gearBest = {}
+    local itemIds = {}
+    local seen = {}
+
     for k, v in pairs(priceTable) do
-        if type(k) == "string" and type(v) == "table" and type(v.m) == "number" and v.m > 0 then
-            if k:sub(1, #prefixG) == prefixG or k:sub(1, #prefixGR) == prefixGR then
-                if not best or v.m < best.m then
-                    best = v
+        if type(v) == "table" and type(v.m) == "number" and v.m > 0 then
+            local itemId = ParseItemIdFromAuctionatorKey(k)
+            if itemId and itemId > 0 then
+                if not seen[itemId] then
+                    seen[itemId] = true
+                    itemIds[#itemIds + 1] = itemId
+                end
+                if type(k) == "string" and (k:sub(1, 2) == "g:" or k:sub(1, 3) == "gr:") then
+                    local cur = gearBest[itemId]
+                    if not cur or v.m < cur.m then
+                        gearBest[itemId] = v
+                    end
                 end
             end
         end
     end
-    return best
+
+    realmIndexCache.tableRef = priceTable
+    realmIndexCache.lastScanTs = lastScanTs
+    realmIndexCache.isEmpty = isEmpty
+    realmIndexCache.revision = atrCacheRevision
+    realmIndexCache.gearBestByItemId = gearBest
+    realmIndexCache.itemIds = itemIds
+    realmIndexCache.itemCount = #itemIds
+    return realmIndexCache
+end
+
+local function FindRawDBEntry(priceTable, itemId)
+    if type(priceTable) ~= "table" or not itemId then
+        return nil
+    end
+    local direct = priceTable[tostring(itemId)] or priceTable[itemId]
+    if type(direct) == "table" then
+        return direct
+    end
+    local idx = EnsureRealmIndex(priceTable)
+    return idx and idx.gearBestByItemId[itemId] or nil
 end
 
 function PF.AuctionatorSource.GetItemData(itemId, itemLink)
@@ -234,52 +318,22 @@ function PF.AuctionatorSource.GetItemData(itemId, itemLink)
     }
 end
 
-local function ParseItemIdFromAuctionatorKey(key)
-    if type(key) == "number" then
-        if key > 0 and key == math.floor(key) then
-            return key
-        end
-        return nil
-    end
-    if type(key) ~= "string" then
-        return nil
-    end
-    local plain = tonumber(key)
-    if plain and plain > 0 and plain == math.floor(plain) then
-        return plain
-    end
-    -- Skip Battle Pets ("p:...")
-    if key:sub(1, 2) == "p:" then
-        return nil
-    end
-    local gearId = key:match("^gr?:(%d+)")
-    if gearId then
-        local num = tonumber(gearId)
-        if num and num > 0 then
-            return num
-        end
-    end
-    return nil
-end
-
 function PF.AuctionatorSource.CollectAllItemIds(targetSet)
     if type(targetSet) ~= "table" then
         return 0
     end
     local priceTable = PF.AuctionatorSource.GetRealmPriceTable()
-    if type(priceTable) ~= "table" then
+    local idx = EnsureRealmIndex(priceTable)
+    if not idx then
         return 0
     end
     local added = 0
-    for k, v in pairs(priceTable) do
-        if type(v) == "table" and type(v.m) == "number" and v.m > 0 then
-            local itemId = ParseItemIdFromAuctionatorKey(k)
-            if itemId and itemId > 0 then
-                if not targetSet[itemId] then
-                    added = added + 1
-                end
-                targetSet[itemId] = true
-            end
+    local ids = idx.itemIds
+    for i = 1, #ids do
+        local itemId = ids[i]
+        if not targetSet[itemId] then
+            targetSet[itemId] = true
+            added = added + 1
         end
     end
     return added
@@ -289,20 +343,8 @@ function PF.AuctionatorSource.GetStatus()
     local available = PF.AuctionatorSource.IsAvailable()
     local priceTable = PF.AuctionatorSource.GetRealmPriceTable()
     local lastScanTs = PF.AuctionatorSource.GetLastScanTimestamp()
-    local itemCount = 0
-
-    if type(priceTable) == "table" then
-        local seen = {}
-        for k, v in pairs(priceTable) do
-            if type(v) == "table" and type(v.m) == "number" and v.m > 0 then
-                local itemId = ParseItemIdFromAuctionatorKey(k)
-                if itemId and not seen[itemId] then
-                    seen[itemId] = true
-                    itemCount = itemCount + 1
-                end
-            end
-        end
-    end
+    local idx = EnsureRealmIndex(priceTable)
+    local itemCount = idx and idx.itemCount or 0
 
     return {
         available = available,
@@ -319,6 +361,7 @@ function PF.AuctionatorSource.Init()
     local api = _G.Auctionator and _G.Auctionator.API and _G.Auctionator.API.v1
     if api and type(api.RegisterForDBUpdate) == "function" then
         local ok = pcall(api.RegisterForDBUpdate, "Profitable", function()
+            PF.AuctionatorSource.InvalidateCache()
             if PF.SideWindow then
                 if PF.SideWindow.frame and (not PF.SideWindow.frame.IsShown or PF.SideWindow.frame:IsShown()) then
                     if PF.SideWindow.Refresh then

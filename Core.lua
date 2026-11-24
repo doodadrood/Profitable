@@ -142,14 +142,18 @@ local function RegisterSlashCommands()
             print(string.format("|cff00ff88[Profitable]|r Auto-Snooze Crafted Plays (12h): %s", Profitable_DB.settings.autoSnoozeOnCraft and "ON" or "OFF"))
         elseif cmd == "clearhidden" or cmd == "clearsnooze" then
             local cleared = (PF.ClearAllSnoozedPlays and PF.ClearAllSnoozedPlays()) or 0
-            if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
+            if PF.SideWindow and PF.SideWindow.ApplySnoozeChange then
+                PF.SideWindow.ApplySnoozeChange()
+            elseif PF.SideWindow and PF.SideWindow.ApplyFilterChange then
                 PF.SideWindow.ApplyFilterChange()
             end
             print(string.format("|cff00ff88[Profitable]|r Restored %d snoozed/hidden plays.", cleared))
         elseif cmd == "unhide" or cmd == "unsnooze" then
             if arg == nil or arg == "" or arg == "all" then
                 local cleared = (PF.ClearAllSnoozedPlays and PF.ClearAllSnoozedPlays()) or 0
-                if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
+                if PF.SideWindow and PF.SideWindow.ApplySnoozeChange then
+                    PF.SideWindow.ApplySnoozeChange()
+                elseif PF.SideWindow and PF.SideWindow.ApplyFilterChange then
                     PF.SideWindow.ApplyFilterChange()
                 end
                 print(string.format("|cff00ff88[Profitable]|r Restored %d snoozed/hidden plays.", cleared))
@@ -159,7 +163,9 @@ local function RegisterSlashCommands()
                     removed, entry = PF.UnsnoozePlay(arg)
                 end
                 if removed then
-                    if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
+                    if PF.SideWindow and PF.SideWindow.ApplySnoozeChange then
+                        PF.SideWindow.ApplySnoozeChange()
+                    elseif PF.SideWindow and PF.SideWindow.ApplyFilterChange then
                         PF.SideWindow.ApplyFilterChange()
                     end
                     print(string.format("|cff00ff88[Profitable]|r Restored %s.", (entry and (entry.itemLink or entry.itemName)) or arg))

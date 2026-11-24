@@ -210,10 +210,7 @@ function PF.SideWindow.SnoozeOpportunity(opp, isPermanent)
             dispName,
             durLabel
         ))
-        PF.SideWindow.ApplyFilterChange()
-        if PF.SideWindow.RefreshSnoozedWindow then
-            PF.SideWindow.RefreshSnoozedWindow()
-        end
+        PF.SideWindow.ApplySnoozeChange()
     end
     return entry
 end
@@ -410,7 +407,7 @@ end
 
 function PF.SideWindow.RefreshOnboardingPopup()
     if not onboardingFrame then return end
-    local status, info = PF.GetAHDataStatus and PF.GetAHDataStatus() or "NO_DATA", { itemCount = 0, ageText = "never" }
+    local status, info = "NO_DATA", { itemCount = 0, ageText = "never" }
     if PF.GetAHDataStatus then
         status, info = PF.GetAHDataStatus()
     end
@@ -606,6 +603,11 @@ function PF.SideWindow.RefreshFilterControls()
             SetTagButtonVisual(btn, tag.label, enabled)
         end
     end
+
+    if not settingsFrame then
+        return
+    end
+
     for _, opt in ipairs(SETTINGS_OPTIONS) do
         local row = settingsCheckRows[opt.key]
         if row then
@@ -739,14 +741,59 @@ function PF.SideWindow.SetCustomBudget(inputValue, quiet)
     return true, copper
 end
 
+function PF.SideWindow.ApplySnoozeChange()
+    local status = (PF.GetAHDataStatus and PF.GetAHDataStatus()) or "FRESH"
+    if status == "FRESH" and not PF.AHVerifier.IsRunning() then
+        if PF.AHVerifier.RefreshForSnoozeChange then
+            PF.AHVerifier.RefreshForSnoozeChange()
+        elseif PF.AHVerifier.RecalculateFromCache then
+            PF.AHVerifier.RecalculateFromCache()
+        end
+    end
+    if sideFrame and (not sideFrame.IsShown or sideFrame:IsShown()) then
+        PF.SideWindow.RefreshRows()
+        if not PF.AHVerifier.IsRunning() and sideFrame.statusText and status == "FRESH" then
+            local count = (Profitable_DB and Profitable_DB.lastTopPlays and #Profitable_DB.lastTopPlays) or 0
+            sideFrame.statusText:SetText(string.format("Top %d Ready", count))
+        end
+    end
+    if settingsFrame and settingsFrame.snoozedTitleText then
+        local snoozed = (PF.GetActiveSnoozedPlays and PF.GetActiveSnoozedPlays()) or {}
+        if #snoozed > 0 then
+            settingsFrame.snoozedTitleText:SetText(string.format(
+                "Snoozed / Hidden Plays: |cffffd100%d active|r |cffaaaaaa(Right-click or 'x' any row to snooze 24h)|r",
+                #snoozed
+            ))
+        else
+            settingsFrame.snoozedTitleText:SetText("Snoozed / Hidden Plays: |cffaaaaaaNone — right-click or click 'x' on any play to hide 24h|r")
+        end
+    end
+    if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
+        PF.DetailWindow.RefreshIfShown()
+    end
+    if snoozedFrame and (not snoozedFrame.IsShown or snoozedFrame:IsShown()) and PF.SideWindow.RefreshSnoozedWindow then
+        PF.SideWindow.RefreshSnoozedWindow()
+    end
+end
+
 function PF.SideWindow.ApplyFilterChange()
-    PF.SideWindow.RefreshFilterControls()
+    if PF.RecipeScanner and PF.RecipeScanner.InvalidateCache then
+        PF.RecipeScanner.InvalidateCache()
+    end
+    if PF.AHVerifier and PF.AHVerifier.InvalidateEvaluatedPool then
+        PF.AHVerifier.InvalidateEvaluatedPool()
+    end
+    if PF.InvalidateAHStatusCache then
+        PF.InvalidateAHStatusCache()
+    end
     local status = (PF.GetAHDataStatus and PF.GetAHDataStatus()) or "FRESH"
     if status == "FRESH" and not PF.AHVerifier.IsRunning() and PF.AHVerifier.RecalculateFromCache then
         PF.AHVerifier.RecalculateFromCache()
     end
     if sideFrame and (not sideFrame.IsShown or sideFrame:IsShown()) then
         PF.SideWindow.Refresh()
+    else
+        PF.SideWindow.RefreshFilterControls()
     end
     if PF.DetailWindow and PF.DetailWindow.RefreshIfShown then
         PF.DetailWindow.RefreshIfShown()
@@ -834,7 +881,7 @@ local function EnsureSnoozedWindow()
                 local removed, entry = PF.UnsnoozePlay(row._snoozeKey)
                 if removed then
                     print(string.format("|cff00ff88[Profitable]|r Restored %s to your opportunity list.", (entry and (entry.itemLink or entry.itemName)) or row._snoozeKey))
-                    PF.SideWindow.ApplyFilterChange()
+                    PF.SideWindow.ApplySnoozeChange()
                 end
             end
         end)
@@ -853,7 +900,7 @@ local function EnsureSnoozedWindow()
         local cleared = (PF.ClearAllSnoozedPlays and PF.ClearAllSnoozedPlays()) or 0
         if cleared > 0 then
             print(string.format("|cff00ff88[Profitable]|r Restored all %d snoozed/hidden plays.", cleared))
-            PF.SideWindow.ApplyFilterChange()
+            PF.SideWindow.ApplySnoozeChange()
         end
     end)
 
@@ -1129,7 +1176,7 @@ local function EnsureSettingsWindow()
         local cleared = (PF.ClearAllSnoozedPlays and PF.ClearAllSnoozedPlays()) or 0
         if cleared > 0 then
             print(string.format("|cff00ff88[Profitable]|r Restored all %d snoozed/hidden plays.", cleared))
-            PF.SideWindow.ApplyFilterChange()
+            PF.SideWindow.ApplySnoozeChange()
         else
             print("|cff00ff88[Profitable]|r No snoozed/hidden plays to clear.")
         end
@@ -1441,7 +1488,8 @@ function PF.SideWindow.RefreshRows()
     if not sideFrame then return end
 
     local effectiveBudget, isCapped = PF.GetEffectiveBudget()
-    local recipes = PF.RecipeScanner.GetKnownRecipes()
+    local recipeCount = (PF.RecipeScanner.GetKnownRecipeCount and PF.RecipeScanner.GetKnownRecipeCount())
+        or #PF.RecipeScanner.GetKnownRecipes()
     local dataStatus, dataInfo = "FRESH", { itemCount = 0, pcfItems = 0, ageText = "0m" }
     if PF.GetAHDataStatus then
         dataStatus, dataInfo = PF.GetAHDataStatus()
@@ -1471,7 +1519,7 @@ function PF.SideWindow.RefreshRows()
             or string.format("|cffffd100%s|r", PF.Formatter.FormatMoney(effectiveBudget))
         sideFrame.infoText:SetText(string.format(
             "Budget: %s  |  Recipes: |cff00ff88%d|r  |  Items: %s%s",
-            budgetLabel, #recipes, itemsLabel, feedNote
+            budgetLabel, recipeCount, itemsLabel, feedNote
         ))
     end
 
@@ -1674,7 +1722,9 @@ function PF.SideWindow.Refresh()
         end
     end
     PF.SideWindow.RefreshRows()
-    PF.SideWindow.RefreshOnboardingPopup()
+    if onboardingFrame and (not onboardingFrame.IsShown or onboardingFrame:IsShown()) then
+        PF.SideWindow.RefreshOnboardingPopup()
+    end
 end
 
 function PF.SideWindow.RunSearch(forceLiveVerify)

@@ -14,8 +14,30 @@ local ACTION_LABELS = {
 
 PF.OpportunityEngine.ACTION_LABELS = ACTION_LABELS
 
+-- Optional per-pass memoization active during FindTopOpportunities() when customOrderBooks == nil
+local activePassMemo = nil
+
+local function GetMemoizedInventoryCounts(itemId, localCache)
+    if not itemId or itemId <= 0 then
+        return 0, 0
+    end
+    local cache = localCache or activePassMemo
+    if cache and cache.invByItem then
+        local hit = cache.invByItem[itemId]
+        if hit then
+            return hit[1], hit[2]
+        end
+    end
+    local inBags = PF.Formatter.GetInventoryCount(itemId, false)
+    local inBank = math.max(0, PF.Formatter.GetInventoryCount(itemId, true) - inBags)
+    if cache and cache.invByItem then
+        cache.invByItem[itemId] = { inBags, inBank }
+    end
+    return inBags, inBank
+end
+
 -- Resolves pure AH unit price and available count without falling back to Vendor sell price
-function PF.OpportunityEngine.ResolveAHPrice(itemId, itemLink)
+local function ResolveAHPriceUncached(itemId, itemLink)
     if not itemId or itemId <= 0 then
         return nil, 0, nil
     end
@@ -101,6 +123,25 @@ function PF.OpportunityEngine.ResolveAHPrice(itemId, itemLink)
     end
 
     return nil, 0, nil
+end
+
+function PF.OpportunityEngine.ResolveAHPrice(itemId, itemLink)
+    if not itemId or itemId <= 0 then
+        return nil, 0, nil
+    end
+    if activePassMemo and activePassMemo.ahPrices and itemLink == nil then
+        local cached = activePassMemo.ahPrices[itemId]
+        if cached ~= nil then
+            if cached == false then
+                return nil, 0, nil
+            end
+            return cached[1], cached[2], cached[3]
+        end
+        local p, c, s = ResolveAHPriceUncached(itemId, nil)
+        activePassMemo.ahPrices[itemId] = p and { p, c, s } or false
+        return p, c, s
+    end
+    return ResolveAHPriceUncached(itemId, itemLink)
 end
 
 -- Returns an ascending-price array of { unitPrice = number, quantity = number }
@@ -288,6 +329,7 @@ end
 function PF.OpportunityEngine.ComputeLiveInventoryState(opp)
     if type(opp) ~= "table" then return end
 
+    local localInvMemo = activePassMemo or { invByItem = {} }
     local units = math.max(1, math.floor(tonumber(opp.quantity) or 1))
     local steps = type(opp.intermediateSteps) == "table" and opp.intermediateSteps or {}
     local neededFromStepsByItem = {}
@@ -310,8 +352,7 @@ function PF.OpportunityEngine.ComputeLiveInventoryState(opp)
             end
             local totalNeeded = math.max(1, math.floor(tonumber(step.totalQuantity) or ((step.countPerUnit or 1) * units)))
             local avgMade = (type(step.avgMade) == "number" and step.avgMade > 0) and step.avgMade or 1
-            local inBags = PF.Formatter.GetInventoryCount(step.outputItemId, false)
-            local inBank = math.max(0, PF.Formatter.GetInventoryCount(step.outputItemId, true) - inBags)
+            local inBags, inBank = GetMemoizedInventoryCounts(step.outputItemId, localInvMemo)
             local remToCraft = math.max(0, totalNeeded - inBags)
             local remBatches = (remToCraft > 0) and math.ceil(remToCraft / avgMade) or 0
 
@@ -357,7 +398,7 @@ function PF.OpportunityEngine.ComputeLiveInventoryState(opp)
                             })
                         end
                         if remBatches > 0 then
-                            local rawInBags = PF.Formatter.GetInventoryCount(subR.itemId, false)
+                            local rawInBags = GetMemoizedInventoryCounts(subR.itemId, localInvMemo)
                             local canMakeBatches = math.floor(rawInBags / perBatch)
                             if canMakeBatches < maxBatchesFromBags then
                                 maxBatchesFromBags = canMakeBatches
@@ -381,7 +422,7 @@ function PF.OpportunityEngine.ComputeLiveInventoryState(opp)
         for _, r in ipairs(opp.recipe.reagents) do
             if r and r.itemId then
                 local perCast = math.max(1, math.floor(tonumber(r.count or r.countPerUnit) or 1))
-                local have = PF.Formatter.GetInventoryCount(r.itemId, false)
+                local have = GetMemoizedInventoryCounts(r.itemId, localInvMemo)
                 local canMake = math.floor(have / perCast)
                 if canMake < maxFinal then
                     maxFinal = canMake
@@ -395,8 +436,7 @@ function PF.OpportunityEngine.ComputeLiveInventoryState(opp)
     if type(opp.shoppingList) == "table" then
         for _, item in ipairs(opp.shoppingList) do
             if type(item) == "table" and item.itemId then
-                local liveInBags = PF.Formatter.GetInventoryCount(item.itemId, false)
-                local liveInBank = math.max(0, PF.Formatter.GetInventoryCount(item.itemId, true) - liveInBags)
+                local liveInBags, liveInBank = GetMemoizedInventoryCounts(item.itemId, localInvMemo)
                 local inMail = (PF.AHVerifier and PF.AHVerifier.GetPurchasedInMailCount)
                     and (PF.AHVerifier.GetPurchasedInMailCount(item.itemId) or 0)
                     or 0
@@ -422,6 +462,7 @@ function PF.OpportunityEngine.ComputeLiveInventoryState(opp)
         end
     end
 
+    opp._inventoryComputed = true
     PF.OpportunityEngine.UpdateInProgressOpportunityPricing(opp)
 end
 
@@ -589,7 +630,7 @@ local function ComputeEndResultKey(candidate)
 end
 
 -- Core Stepped Order-Book Calculator for single-item or recipe plays
-function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCopper, customOrderBooks)
+function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCopper, customOrderBooks, deferInventory)
     if not candidate or not candidate.unitNetRevenue or candidate.unitNetRevenue <= 0 then
         return nil
     end
@@ -776,8 +817,6 @@ function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCoppe
     for idx, r in ipairs(reagents) do
         local cur = cursors[idx]
         local avgUnit = (cur.totalQty > 0) and math.floor((cur.totalCost / cur.totalQty) + 0.5) or 0
-        local inBags = PF.Formatter.GetInventoryCount(r.itemId, false)
-        local inBank = math.max(0, PF.Formatter.GetInventoryCount(r.itemId, true) - inBags)
 
         table.insert(shoppingList, {
             itemId = r.itemId,
@@ -787,9 +826,9 @@ function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCoppe
             countPerUnit = r.countPerUnit,
             directQuantity = (r.directCountPerUnit or 0) * units,
             totalQuantity = cur.totalQty,
-            haveInBags = inBags,
-            haveInBank = inBank,
-            remainingToBuy = math.max(0, cur.totalQty - inBags),
+            haveInBags = 0,
+            haveInBank = 0,
+            remainingToBuy = cur.totalQty,
             totalCost = cur.totalCost,
             minUnitPrice = cur.minUnitPrice or avgUnit,
             maxUnitPrice = cur.maxUnitPrice or avgUnit,
@@ -842,16 +881,19 @@ function PF.OpportunityEngine.CalculateSteppedOpportunity(candidate, budgetCoppe
         shoppingList = shoppingList,
         spikeInfo = candidate.spikeInfo,
         verified = (candidate.verified == true),
+        _inventoryComputed = false,
     }
 
-    PF.OpportunityEngine.ComputeLiveInventoryState(opp)
+    if not deferInventory then
+        PF.OpportunityEngine.ComputeLiveInventoryState(opp)
+    end
     return opp
 end
 
 -- Aggregates all BUY_DE items that disenchant into the same primary enchanting material
 -- (e.g., 5 different blue items that all DE into [Large Glimmering Shard]) into a single
 -- lane so they don't occupy all 5 slots of the Top 5!
-function PF.OpportunityEngine.CalculateAggregatedBuyDEOpportunity(groupCandidates, budgetCopper, customOrderBooks)
+function PF.OpportunityEngine.CalculateAggregatedBuyDEOpportunity(groupCandidates, budgetCopper, customOrderBooks, deferInventory)
     if type(groupCandidates) ~= "table" or #groupCandidates == 0 then
         return nil
     end
@@ -860,7 +902,7 @@ function PF.OpportunityEngine.CalculateAggregatedBuyDEOpportunity(groupCandidate
     local firstCand = groupCandidates[1]
     local pm = firstCand.deBreakdown and firstCand.deBreakdown.primaryMat
     if not pm then
-        return PF.OpportunityEngine.CalculateSteppedOpportunity(firstCand, budgetCopper, customOrderBooks)
+        return PF.OpportunityEngine.CalculateSteppedOpportunity(firstCand, budgetCopper, customOrderBooks, deferInventory)
     end
 
     local isShard = (firstCand.deBreakdown and firstCand.deBreakdown.isShardOrCrystal) == true
@@ -987,8 +1029,10 @@ function PF.OpportunityEngine.CalculateAggregatedBuyDEOpportunity(groupCandidate
     local shoppingList = {}
     for _, acc in ipairs(itemOrder) do
         local avgUnit = math.floor((acc.totalCost / acc.totalQty) + 0.5)
-        local inBags = PF.Formatter.GetInventoryCount(acc.itemId, false)
-        local inBank = math.max(0, PF.Formatter.GetInventoryCount(acc.itemId, true) - inBags)
+        local inBags, inBank = 0, 0
+        if not deferInventory then
+            inBags, inBank = GetMemoizedInventoryCounts(acc.itemId)
+        end
         table.insert(shoppingList, {
             itemId = acc.itemId,
             name = acc.name,
@@ -1045,6 +1089,7 @@ function PF.OpportunityEngine.CalculateAggregatedBuyDEOpportunity(groupCandidate
         shoppingList = shoppingList,
         spikeInfo = firstCand.spikeInfo,
         verified = false,
+        _inventoryComputed = not deferInventory,
     }
 end
 
@@ -1237,7 +1282,6 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
     if PF.PruneExpiredSnoozes then
         PF.PruneExpiredSnoozes()
     end
-    local isSnoozed = PF.IsPlaySnoozed
     local mode = (PF.GetPriceSourceMode and PF.GetPriceSourceMode()) or "AUTO"
 
     local candidates = {}
@@ -1276,7 +1320,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
 
             -- Strategy A: Direct AH Buy -> Vendor
             if allowVendorPlays and vendorSell and vendorSell > minBuyout then
-                local vendorCand = {
+                table.insert(candidates, {
                     actionType = "VENDOR",
                     itemId = itemId,
                     itemName = itemName,
@@ -1289,10 +1333,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                     rawReagents = {
                         { itemId = itemId, name = itemName, count = 1 },
                     },
-                }
-                if not (isSnoozed and isSnoozed(vendorCand)) then
-                    table.insert(candidates, vendorCand)
-                end
+                })
             end
 
             -- Strategy B: Direct AH Buy -> Disenchant (fast pre-check skips ~85% of non-gear items before CanDisenchant)
@@ -1304,7 +1345,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                     if deEval and deEval.netValue > minBuyout then
                         if not vendorSell or deEval.netValue > vendorSell then
                             local isShard = deEval.isShardOrCrystal == true
-                            local deCand = {
+                            table.insert(candidates, {
                                 actionType = "BUY_DE",
                                 itemId = itemId,
                                 itemName = itemName,
@@ -1319,10 +1360,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
                                 rawReagents = {
                                     { itemId = itemId, name = itemName, count = 1 },
                                 },
-                            }
-                            if not (isSnoozed and isSnoozed(deCand)) then
-                                table.insert(candidates, deCand)
-                            end
+                            })
                         end
                     end
                 end
@@ -1334,8 +1372,7 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
     local recipes = (allowCraftPlays or allowDEPlays) and PF.RecipeScanner and PF.RecipeScanner.GetKnownRecipes() or {}
     for _, recipe in ipairs(recipes) do
         local outId = recipe.outputItemId
-        if outId and outId > 0 and type(recipe.reagents) == "table" and #recipe.reagents > 0
-            and not (isSnoozed and isSnoozed({ actionType = "CRAFT_AH", itemId = outId })) then
+        if outId and outId > 0 and type(recipe.reagents) == "table" and #recipe.reagents > 0 then
             local avgMade = (recipe.avgMade and recipe.avgMade > 0) and recipe.avgMade or 1
             local meta = PF.VendorDatabase.GetItemMetadata(outId, recipe.outputLink)
             local itemName = recipe.name or (meta and meta.name) or string.format("Item #%d", outId)
@@ -1435,94 +1472,46 @@ function PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
     return candidates
 end
 
--- Evaluates, aggregates by end-result market (so multiple items that DE into the same material
--- are rolled into a single play per DE material), and computes Honorable Mentions (Top Craft & Top Vendor).
-function PF.OpportunityEngine.FindTopOpportunities(budgetOverride, customOrderBooks, limitOverride)
-    local budget = (type(budgetOverride) == "number" and budgetOverride >= 0)
-        and budgetOverride
-        or ((PF.GetEffectiveBudget and PF.GetEffectiveBudget()) or PF.Formatter.GetPlayerGold())
+-- Selects the unsnoozed Top N plays (1 per end-result market) and Honorable Mentions
+-- from an already-sorted allEvaluated list in O(M) time (~0.05ms), lazily populating
+-- live inventory counts and detailed explanations only on the selected rows.
+function PF.OpportunityEngine.SelectTopAndHonorableMentions(allEvaluated, limitOverride)
+    if PF.PruneExpiredSnoozes then
+        PF.PruneExpiredSnoozes()
+    end
     local topLimit = limitOverride or ((Profitable_DB and Profitable_DB.settings and Profitable_DB.settings.topCount) or 5)
+    local isSnoozed = PF.IsPlaySnoozed
 
-    local candidates = PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
-
-    -- 1. Group BUY_DE candidates by their primary target DE material so items that DE
-    -- into the same material (e.g. Large Glimmering Shard) aggregate into a single play!
-    local buyDEGroups = {}
-    local otherCandidates = {}
-
-    for _, cand in ipairs(candidates) do
-        if cand.actionType == "BUY_DE" and cand.deBreakdown and cand.deBreakdown.primaryMat then
-            local matKey = ComputeEndResultKey(cand)
-            buyDEGroups[matKey] = buyDEGroups[matKey] or {}
-            table.insert(buyDEGroups[matKey], cand)
-        else
-            table.insert(otherCandidates, cand)
-        end
-    end
-
-    local allEvaluated = {}
-
-    -- Evaluate each aggregated BUY_DE material group
-    for _, group in pairs(buyDEGroups) do
-        local aggOpp = PF.OpportunityEngine.CalculateAggregatedBuyDEOpportunity(group, budget, customOrderBooks)
-        if aggOpp and aggOpp.totalProfit > 0 then
-            table.insert(allEvaluated, aggOpp)
-        end
-    end
-
-    -- Evaluate all Craft & Vendor plays (keeping best exit strategy per crafted/vendored itemId)
-    local bestByCraftOrVendorItem = {}
-    for _, cand in ipairs(otherCandidates) do
-        local opp = PF.OpportunityEngine.CalculateSteppedOpportunity(cand, budget, customOrderBooks)
-        if opp and opp.totalProfit > 0 then
-            local existing = bestByCraftOrVendorItem[opp.itemId]
-            if not existing or opp.totalProfit > existing.totalProfit then
-                bestByCraftOrVendorItem[opp.itemId] = opp
-            end
-        end
-    end
-    for _, opp in pairs(bestByCraftOrVendorItem) do
-        table.insert(allEvaluated, opp)
-    end
-
-    -- Sort all evaluated plays by Total Net Profit descending
-    table.sort(allEvaluated, function(a, b)
-        if a.totalProfit ~= b.totalProfit then
-            return a.totalProfit > b.totalProfit
-        end
-        if a.roiPercent ~= b.roiPercent then
-            return a.roiPercent > b.roiPercent
-        end
-        return a.itemId < b.itemId
-    end)
-
-    -- 2. Select the True Top 5 with strict End-Result deduplication
-    -- (At most ONE play per target DE material / endResultKey in the Top 5)
     local results = {}
     local usedEndResultKeys = {}
     local usedPlayIds = {}
 
-    for _, opp in ipairs(allEvaluated) do
+    for _, opp in ipairs(allEvaluated or {}) do
         local key = opp.endResultKey or opp.id
-        if not (PF.IsPlaySnoozed and PF.IsPlaySnoozed(opp)) and not usedEndResultKeys[key] and #results < topLimit then
+        if not (isSnoozed and isSnoozed(opp)) and not usedEndResultKeys[key] and #results < topLimit then
             usedEndResultKeys[key] = true
             usedPlayIds[opp.id] = true
             opp.rank = #results + 1
+            if not opp._inventoryComputed then
+                PF.OpportunityEngine.ComputeLiveInventoryState(opp)
+            end
             opp.summaryLine = PF.OpportunityEngine.FormatOpportunityLine(opp.rank, opp)
-            opp.explanation = PF.OpportunityEngine.BuildDetailedExplanation(opp)
+            if not opp.explanation then
+                opp.explanation = PF.OpportunityEngine.BuildDetailedExplanation(opp)
+            end
             table.insert(results, opp)
         end
     end
 
-    -- 3. Build "Honorable Mentions" section:
-    -- Slot 1: Top Crafting play (not already in Top 5, or best craft play overall)
+    -- Build "Honorable Mentions" section:
+    -- Slot 1: Top Crafting play (not already in Top 5)
     -- Slot 2: Top Vendor play (VENDOR or CRAFT_VENDOR not already in Top 5)
     local honorableMentions = {}
     local bestCraftHM = nil
     local bestVendorHM = nil
 
-    for _, opp in ipairs(allEvaluated) do
-        if not (PF.IsPlaySnoozed and PF.IsPlaySnoozed(opp)) then
+    for _, opp in ipairs(allEvaluated or {}) do
+        if not (isSnoozed and isSnoozed(opp)) then
             local isCraft = (opp.actionType == "CRAFT_AH" or opp.actionType == "CRAFT_VENDOR" or opp.actionType == "CRAFT_DE")
             local isVendor = (opp.actionType == "VENDOR" or opp.actionType == "CRAFT_VENDOR")
 
@@ -1532,22 +1521,122 @@ function PF.OpportunityEngine.FindTopOpportunities(budgetOverride, customOrderBo
             if isVendor and not usedPlayIds[opp.id] and (not bestCraftHM or opp.id ~= bestCraftHM.id) and not bestVendorHM then
                 bestVendorHM = opp
             end
+            if bestCraftHM and bestVendorHM then
+                break
+            end
         end
     end
 
     if bestCraftHM then
         bestCraftHM.hmCategory = "Top Craft"
+        if not bestCraftHM._inventoryComputed then
+            PF.OpportunityEngine.ComputeLiveInventoryState(bestCraftHM)
+        end
         bestCraftHM.summaryLine = PF.OpportunityEngine.FormatOpportunityLine(nil, bestCraftHM, "|cff00ccff[Craft]|r")
-        bestCraftHM.explanation = PF.OpportunityEngine.BuildDetailedExplanation(bestCraftHM)
+        if not bestCraftHM.explanation then
+            bestCraftHM.explanation = PF.OpportunityEngine.BuildDetailedExplanation(bestCraftHM)
+        end
         table.insert(honorableMentions, bestCraftHM)
     end
     if bestVendorHM then
         bestVendorHM.hmCategory = "Top Vendor"
+        if not bestVendorHM._inventoryComputed then
+            PF.OpportunityEngine.ComputeLiveInventoryState(bestVendorHM)
+        end
         bestVendorHM.summaryLine = PF.OpportunityEngine.FormatOpportunityLine(nil, bestVendorHM, "|cffffd100[Vendor]|r")
-        bestVendorHM.explanation = PF.OpportunityEngine.BuildDetailedExplanation(bestVendorHM)
+        if not bestVendorHM.explanation then
+            bestVendorHM.explanation = PF.OpportunityEngine.BuildDetailedExplanation(bestVendorHM)
+        end
         table.insert(honorableMentions, bestVendorHM)
     end
 
+    return results, honorableMentions
+end
+
+-- Evaluates, aggregates by end-result market (so multiple items that DE into the same material
+-- are rolled into a single play per DE material), and computes Honorable Mentions (Top Craft & Top Vendor).
+function PF.OpportunityEngine.FindTopOpportunities(budgetOverride, customOrderBooks, limitOverride)
+    local budget = (type(budgetOverride) == "number" and budgetOverride >= 0)
+        and budgetOverride
+        or ((PF.GetEffectiveBudget and PF.GetEffectiveBudget()) or PF.Formatter.GetPlayerGold())
+    local topLimit = limitOverride or ((Profitable_DB and Profitable_DB.settings and Profitable_DB.settings.topCount) or 5)
+
+    local hasRecipeBatch = (PF.RecipeScanner and PF.RecipeScanner.BeginBatchLookup ~= nil)
+    if hasRecipeBatch then
+        PF.RecipeScanner.BeginBatchLookup()
+    end
+    local prevPassMemo = activePassMemo
+    activePassMemo = {
+        ahPrices = (customOrderBooks == nil) and {} or nil,
+        invByItem = {},
+    }
+
+    local ok, results, allEvaluated, honorableMentions = pcall(function()
+        local candidates = PF.OpportunityEngine.BuildAllCandidates(customOrderBooks)
+
+        -- 1. Group BUY_DE candidates by their primary target DE material so items that DE
+        -- into the same material (e.g. Large Glimmering Shard) aggregate into a single play!
+        local buyDEGroups = {}
+        local otherCandidates = {}
+
+        for _, cand in ipairs(candidates) do
+            if cand.actionType == "BUY_DE" and cand.deBreakdown and cand.deBreakdown.primaryMat then
+                local matKey = ComputeEndResultKey(cand)
+                buyDEGroups[matKey] = buyDEGroups[matKey] or {}
+                table.insert(buyDEGroups[matKey], cand)
+            else
+                table.insert(otherCandidates, cand)
+            end
+        end
+
+        local evaluated = {}
+
+        -- Evaluate each aggregated BUY_DE material group (deferring inventory scan until Top selection)
+        for _, group in pairs(buyDEGroups) do
+            local aggOpp = PF.OpportunityEngine.CalculateAggregatedBuyDEOpportunity(group, budget, customOrderBooks, true)
+            if aggOpp and aggOpp.totalProfit > 0 then
+                table.insert(evaluated, aggOpp)
+            end
+        end
+
+        -- Evaluate all Craft & Vendor plays (keeping best exit strategy per crafted/vendored itemId)
+        local bestByCraftOrVendorItem = {}
+        for _, cand in ipairs(otherCandidates) do
+            local opp = PF.OpportunityEngine.CalculateSteppedOpportunity(cand, budget, customOrderBooks, true)
+            if opp and opp.totalProfit > 0 then
+                local existing = bestByCraftOrVendorItem[opp.itemId]
+                if not existing or opp.totalProfit > existing.totalProfit then
+                    bestByCraftOrVendorItem[opp.itemId] = opp
+                end
+            end
+        end
+        for _, opp in pairs(bestByCraftOrVendorItem) do
+            table.insert(evaluated, opp)
+        end
+
+        -- Sort all evaluated plays by Total Net Profit descending
+        table.sort(evaluated, function(a, b)
+            if a.totalProfit ~= b.totalProfit then
+                return a.totalProfit > b.totalProfit
+            end
+            if a.roiPercent ~= b.roiPercent then
+                return a.roiPercent > b.roiPercent
+            end
+            return a.itemId < b.itemId
+        end)
+
+        local selTop, selHM = PF.OpportunityEngine.SelectTopAndHonorableMentions(evaluated, topLimit)
+        return selTop, evaluated, selHM
+    end)
+
+    activePassMemo = prevPassMemo
+    if hasRecipeBatch and PF.RecipeScanner and PF.RecipeScanner.EndBatchLookup then
+        PF.RecipeScanner.EndBatchLookup()
+    end
+
+    if not ok then
+        error(results)
+    end
     return results, allEvaluated, honorableMentions
 end
 

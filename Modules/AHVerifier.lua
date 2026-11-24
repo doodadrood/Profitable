@@ -25,6 +25,14 @@ local pollItemKeyElapsed = 0
 local MAX_ORDERBOOK_ROWS = 60
 local MAX_ORDERBOOK_QTY = 600
 local MAX_VERIFY_QUEUE = 25
+local orderBookRevision = 0
+local lastEvaluatedPool = nil
+local lastPoolSignature = nil
+
+function PF.AHVerifier.InvalidateEvaluatedPool()
+    lastEvaluatedPool = nil
+    lastPoolSignature = nil
+end
 
 -- Active / Pending Default AH UI Purchase State
 local activeSearchItemId = nil
@@ -252,6 +260,11 @@ function PF.AHVerifier.RecordOrderBook(itemId, listings)
             source = "Scan",
         }
     end
+    orderBookRevision = orderBookRevision + 1
+    PF.AHVerifier.InvalidateEvaluatedPool()
+    if PF.InvalidateAHStatusCache then
+        PF.InvalidateAHStatusCache()
+    end
 end
 
 -- Evicts an item from orderBookCache and PCF_DB.prices when a live AH check confirms
@@ -267,6 +280,11 @@ function PF.AHVerifier.EvictUnavailableItem(itemId)
     }
     if _G.PCF_DB and type(_G.PCF_DB.prices) == "table" then
         _G.PCF_DB.prices[itemId] = nil
+    end
+    orderBookRevision = orderBookRevision + 1
+    PF.AHVerifier.InvalidateEvaluatedPool()
+    if PF.InvalidateAHStatusCache then
+        PF.InvalidateAHStatusCache()
     end
 end
 
@@ -388,15 +406,95 @@ local function EnqueuePlayList(list)
     end
 end
 
+local function BuildPoolSignature()
+    local s = (Profitable_DB and Profitable_DB.settings) or {}
+    local ahStatus, ahInfo = "FRESH", nil
+    if PF.GetAHDataStatus then
+        ahStatus, ahInfo = PF.GetAHDataStatus()
+    end
+    local budget = (PF.GetEffectiveBudget and PF.GetEffectiveBudget())
+        or (PF.Formatter and PF.Formatter.GetPlayerGold and PF.Formatter.GetPlayerGold())
+        or 0
+    local ahCut = (PF.GetEffectiveAHCutRate and PF.GetEffectiveAHCutRate()) or s.ahCutRate or 0.05
+    local mode = (PF.GetPriceSourceMode and PF.GetPriceSourceMode()) or "AUTO"
+
+    return {
+        dbRef = Profitable_DB,
+        orderBookCacheRef = Profitable_DB and Profitable_DB.orderBookCache,
+        orderBookRev = orderBookRevision,
+        budget = budget,
+        ahCut = ahCut,
+        mode = mode,
+        ahStatus = ahStatus,
+        lastScanTs = (ahInfo and ahInfo.lastScanTimestamp) or 0,
+        itemCount = (ahInfo and ahInfo.itemCount) or 0,
+        activeSource = (ahInfo and ahInfo.activeSource) or "None",
+        pcfPricesRef = _G.PCF_DB and _G.PCF_DB.prices,
+        atrTableRef = (PF.AuctionatorSource and PF.AuctionatorSource.GetRealmPriceTable and PF.AuctionatorSource.GetRealmPriceTable()) or nil,
+        atrRev = (PF.AuctionatorSource and PF.AuctionatorSource.GetCacheRevision and PF.AuctionatorSource.GetCacheRevision()) or 0,
+        recipeRev = (PF.RecipeScanner and PF.RecipeScanner.GetCacheRevision and PF.RecipeScanner.GetCacheRevision()) or 0,
+        assumeDE = (s.assumeCanDisenchant ~= false),
+        showCraft = (s.showCraftPlays ~= false),
+        showVendor = (s.showVendorPlays ~= false),
+        buyoutOnly = (s.buyoutOnly ~= false),
+        includeAlts = (s.includeAllCharRecipes == true),
+        includeBase = (s.includeSkillMatchedBaselineRecipes ~= false),
+        includeTrainer = (s.includeTrainerRecommendations ~= false),
+        lookahead = s.trainerSkillLookahead or 25,
+        useInterm = (s.useIntermediateCrafting ~= false),
+        spikeGuard = (s.useHistoricalSpikeGuard ~= false),
+        deductDep = (s.deductExpectedDeposit ~= false),
+        minProfit = s.minProfitCopper or 100,
+        minROI = s.minROIPercent or 5,
+        topCount = s.topCount or 5,
+    }
+end
+
+local function PoolSignaturesMatch(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then
+        return false
+    end
+    for k, v in pairs(a) do
+        if b[k] ~= v then
+            return false
+        end
+    end
+    return true
+end
+
 function PF.AHVerifier.RecalculateFromCache()
     local topPlays, allEvaluated, honorableMentions = PF.OpportunityEngine.FindTopOpportunities()
     MarkVerifiedOpportunities(topPlays, verifiedInSession)
     MarkVerifiedOpportunities(honorableMentions, verifiedInSession)
-    MarkVerifiedOpportunities(allEvaluated, verifiedInSession)
+    lastEvaluatedPool = allEvaluated
+    lastPoolSignature = BuildPoolSignature()
     Profitable_DB = Profitable_DB or {}
     Profitable_DB.lastTopPlays = topPlays
     Profitable_DB.lastHonorableMentions = honorableMentions
     return topPlays, honorableMentions, allEvaluated
+end
+
+-- Fast O(M) rotation for Snooze / Unsnooze / Craft-Auto-Snooze: re-selects Top 5 and
+-- Honorable Mentions directly from the cached evaluated pool (~0.05ms) without re-scanning
+-- all AH items or recipes when prices, budget, and filter settings have not changed.
+function PF.AHVerifier.RefreshForSnoozeChange()
+    if type(lastEvaluatedPool) == "table"
+        and lastPoolSignature
+        and PF.OpportunityEngine
+        and PF.OpportunityEngine.SelectTopAndHonorableMentions then
+        local curSig = BuildPoolSignature()
+        if curSig.ahStatus == "FRESH" and PoolSignaturesMatch(lastPoolSignature, curSig) then
+            local topPlays, honorableMentions = PF.OpportunityEngine.SelectTopAndHonorableMentions(lastEvaluatedPool)
+            MarkVerifiedOpportunities(topPlays, verifiedInSession)
+            MarkVerifiedOpportunities(honorableMentions, verifiedInSession)
+            Profitable_DB = Profitable_DB or {}
+            Profitable_DB.lastTopPlays = topPlays
+            Profitable_DB.lastHonorableMentions = honorableMentions
+            return topPlays, honorableMentions, true
+        end
+    end
+    local topPlays, honorableMentions = PF.AHVerifier.RecalculateFromCache()
+    return topPlays, honorableMentions, false
 end
 
 local function FinalizeRun(reason)
@@ -406,9 +504,11 @@ local function FinalizeRun(reason)
     itemKeyCallbacks = {}
     ClearPendingItemKeyWatchers()
 
-    local topPlays, _, honorableMentions = PF.OpportunityEngine.FindTopOpportunities()
+    local topPlays, allEvaluated, honorableMentions = PF.OpportunityEngine.FindTopOpportunities()
     MarkVerifiedOpportunities(topPlays, verifiedInSession)
     MarkVerifiedOpportunities(honorableMentions, verifiedInSession)
+    lastEvaluatedPool = allEvaluated
+    lastPoolSignature = BuildPoolSignature()
 
     Profitable_DB = Profitable_DB or {}
     Profitable_DB.lastTopPlays = topPlays
@@ -619,9 +719,11 @@ ScheduleNextVerification = function(delay)
         verifyIndex = verifyIndex + 1
         if verifyIndex > #verifyQueue then
             if PF.AHVerifier.IsAuctionHouseOpen() and #verifyQueue < MAX_VERIFY_QUEUE and ShouldContinuePastTimeout() then
-                local currentTop, _, currentHM = PF.OpportunityEngine.FindTopOpportunities()
+                local currentTop, currentAllEval, currentHM = PF.OpportunityEngine.FindTopOpportunities()
                 MarkVerifiedOpportunities(currentTop, verifiedInSession)
                 MarkVerifiedOpportunities(currentHM, verifiedInSession)
+                lastEvaluatedPool = currentAllEval
+                lastPoolSignature = BuildPoolSignature()
                 Profitable_DB.lastTopPlays = currentTop
                 Profitable_DB.lastHonorableMentions = currentHM
                 EnqueuePlayList(currentTop)
@@ -736,11 +838,13 @@ function PF.AHVerifier.StartDiscoveryAndVerification(callbacks)
         or false
 
     local topCount = settings.topCount or 5
-    local initialTop, _, initialHM = PF.OpportunityEngine.FindTopOpportunities(nil, nil, math.max(candidateCount, topCount))
+    local initialTop, initialAllEval, initialHM = PF.OpportunityEngine.FindTopOpportunities(nil, nil, math.max(candidateCount, topCount))
     local top5 = {}
     for i = 1, math.min(topCount, #initialTop) do
         top5[i] = initialTop[i]
     end
+    lastEvaluatedPool = initialAllEval
+    lastPoolSignature = BuildPoolSignature()
     Profitable_DB = Profitable_DB or {}
     Profitable_DB.lastTopPlays = top5
     Profitable_DB.lastHonorableMentions = initialHM

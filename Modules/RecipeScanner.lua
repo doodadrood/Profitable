@@ -48,6 +48,21 @@ local INVALID_CRAFTING_PROFESSIONS = {
 
 local pendingOpenRecipe = nil
 local pendingScanRetry = false
+local recipeCacheRevision = 0
+local recipeCountCache = nil
+local activeBatchIndex = nil
+local batchDepth = 0
+
+function PF.RecipeScanner.InvalidateCache()
+    recipeCacheRevision = recipeCacheRevision + 1
+    recipeCountCache = nil
+    activeBatchIndex = nil
+    batchDepth = 0
+end
+
+function PF.RecipeScanner.GetCacheRevision()
+    return recipeCacheRevision
+end
 
 local function NormalizeItemName(name)
     if type(name) ~= "string" then return nil end
@@ -515,6 +530,9 @@ function PF.RecipeScanner.PruneUnlearnedCharRecipes()
         end
     end
 
+    if pruned > 0 then
+        PF.RecipeScanner.InvalidateCache()
+    end
     return pruned
 end
 
@@ -522,6 +540,7 @@ function PF.RecipeScanner.RepairSavedRecipeProfessions()
     if type(Profitable_DB) ~= "table" then
         return 0
     end
+    PF.RecipeScanner.InvalidateCache()
     local repaired = 0
 
     if type(Profitable_DB.charRecipes) == "table" then
@@ -638,6 +657,7 @@ local function SaveRecipe(charRecipes, recipe)
     recipe.key = key
     recipe.lastScanned = time()
     charRecipes[key] = recipe
+    PF.RecipeScanner.InvalidateCache()
     if not recipe.isTrainerRecommendation then
         InvalidateStaleBaselinePlaysForScannedRecipe(recipe)
     end
@@ -1003,11 +1023,10 @@ function PF.RecipeScanner.ScanCurrentProfessionWindow()
     return count
 end
 
-function PF.RecipeScanner.GetKnownRecipes()
-    PF.RecipeScanner.ScanCurrentProfessionWindow()
-
+local function BuildKnownRecipesAndIndex()
     local list = {}
-    local seenByOutput = {}
+    local byOutput = {}
+    local hasProfession = {}
     local knownProfessions = {}
     local profNames, profNamesLower, skillLineIds, hasAuthData, skillRanks = GetCurrentCharacterProfessions()
     local currentCharKey = PF.GetCharacterKey()
@@ -1023,9 +1042,10 @@ function PF.RecipeScanner.GetKnownRecipes()
                 if enforceCurrentChar and not IsRecipeLearnedByCurrentCharacter(recipe, profNames, profNamesLower, skillLineIds, hasAuthData) then
                     keysToPrune = keysToPrune or {}
                     table.insert(keysToPrune, key)
-                elseif not seenByOutput[recipe.outputItemId] then
-                    seenByOutput[recipe.outputItemId] = true
+                elseif not byOutput[recipe.outputItemId] then
+                    byOutput[recipe.outputItemId] = recipe
                     if recipe.profession and not INVALID_CRAFTING_PROFESSIONS[recipe.profession] then
+                        hasProfession[recipe.profession] = true
                         knownProfessions[recipe.profession] = math.max(knownProfessions[recipe.profession] or 0, recipe.skillReq or 1)
                     end
                     table.insert(list, recipe)
@@ -1058,16 +1078,15 @@ function PF.RecipeScanner.GetKnownRecipes()
 
         local lookahead = (settings.includeTrainerRecommendations ~= false) and (settings.trainerSkillLookahead or 25) or 0
         for _, base in ipairs(PF.RecipeDatabase.GetAllBaselineRecipes()) do
-            if not seenByOutput[base.outputItemId]
+            if not byOutput[base.outputItemId]
                 and base.profession
                 and knownProfessions[base.profession]
                 and IsBaselineOutputNameValid(base) then
                 local charRank = knownProfessions[base.profession]
                 local req = base.skillReq or 1
                 if req <= (charRank + lookahead) then
-                    seenByOutput[base.outputItemId] = true
                     local isUnlearned = (req > charRank) or (base.source and base.source ~= "Trainer")
-                    table.insert(list, {
+                    local baseRec = {
                         name = base.name,
                         profession = base.profession,
                         professionId = PROFESSION_TO_SKILL_LINE_ID[base.profession],
@@ -1081,32 +1100,91 @@ function PF.RecipeScanner.GetKnownRecipes()
                         maxMade = base.avgMade or 1,
                         avgMade = base.avgMade or 1,
                         reagents = base.reagents,
-                    })
+                    }
+                    byOutput[base.outputItemId] = baseRec
+                    hasProfession[base.profession] = true
+                    table.insert(list, baseRec)
                 end
             end
         end
     end
 
+    recipeCountCache = {
+        count = #list,
+        dbRef = Profitable_DB,
+        charRecipesRef = Profitable_DB and Profitable_DB.charRecipes,
+        includeAlts = (settings.includeAllCharRecipes == true),
+        includeBase = (settings.includeSkillMatchedBaselineRecipes ~= false),
+        includeTrainer = (settings.includeTrainerRecommendations ~= false),
+        lookahead = settings.trainerSkillLookahead or 25,
+    }
+
+    return list, {
+        list = list,
+        byOutput = byOutput,
+        hasProfession = hasProfession,
+    }
+end
+
+function PF.RecipeScanner.BeginBatchLookup()
+    if batchDepth <= 0 or not activeBatchIndex then
+        local _, idx = BuildKnownRecipesAndIndex()
+        activeBatchIndex = idx
+        batchDepth = 1
+    else
+        batchDepth = batchDepth + 1
+    end
+    return activeBatchIndex
+end
+
+function PF.RecipeScanner.EndBatchLookup()
+    if batchDepth <= 1 then
+        batchDepth = 0
+        activeBatchIndex = nil
+    else
+        batchDepth = batchDepth - 1
+    end
+end
+
+function PF.RecipeScanner.GetKnownRecipes()
+    if batchDepth > 0 and activeBatchIndex then
+        return activeBatchIndex.list
+    end
+    local list = BuildKnownRecipesAndIndex()
     return list
+end
+
+function PF.RecipeScanner.GetKnownRecipeCount()
+    local settings = (Profitable_DB and Profitable_DB.settings) or {}
+    if recipeCountCache
+        and recipeCountCache.dbRef == Profitable_DB
+        and recipeCountCache.charRecipesRef == (Profitable_DB and Profitable_DB.charRecipes)
+        and recipeCountCache.includeAlts == (settings.includeAllCharRecipes == true)
+        and recipeCountCache.includeBase == (settings.includeSkillMatchedBaselineRecipes ~= false)
+        and recipeCountCache.includeTrainer == (settings.includeTrainerRecommendations ~= false)
+        and recipeCountCache.lookahead == (settings.trainerSkillLookahead or 25) then
+        return recipeCountCache.count
+    end
+    local list = PF.RecipeScanner.GetKnownRecipes()
+    return #list
 end
 
 function PF.RecipeScanner.GetIntermediateRecipeForItem(itemId)
     if not itemId then return nil end
-    -- Prefer the character's own scanned recipe if known
-    local known = PF.RecipeScanner.GetKnownRecipes()
-    for _, recipe in ipairs(known) do
-        if recipe.outputItemId == itemId then
-            return recipe
-        end
+    local idx = activeBatchIndex
+    if not idx then
+        local _, built = BuildKnownRecipesAndIndex()
+        idx = built
+    end
+    -- Prefer the character's own scanned or baseline recipe in O(1)
+    local direct = idx.byOutput[itemId]
+    if direct then
+        return direct
     end
     -- Check if the character has any recipe in that profession before using static intermediate conversion
     local staticConv = INTERMEDIATE_CONVERSIONS[itemId]
-    if staticConv then
-        for _, recipe in ipairs(known) do
-            if recipe.profession == staticConv.profession then
-                return staticConv
-            end
-        end
+    if staticConv and idx.hasProfession[staticConv.profession] then
+        return staticConv
     end
     return nil
 end
@@ -1471,8 +1549,12 @@ function PF.RecipeScanner.HandleCraftCompleted(itemId, itemLink, spellId)
         opp.itemLink or itemLink or opp.itemName or ("Item #" .. tostring(opp.itemId)),
         durText
     ))
-    if PF.SideWindow and PF.SideWindow.ApplyFilterChange then
-        PF.SideWindow.ApplyFilterChange()
+    if PF.SideWindow then
+        if PF.SideWindow.ApplySnoozeChange then
+            PF.SideWindow.ApplySnoozeChange()
+        elseif PF.SideWindow.ApplyFilterChange then
+            PF.SideWindow.ApplyFilterChange()
+        end
     end
     return true
 end

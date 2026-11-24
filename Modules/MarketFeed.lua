@@ -153,6 +153,9 @@ function PF.MarketFeed.MirrorToPCF()
             end
         end
     end
+    if mirrored > 0 and PF.InvalidateAHStatusCache then
+        PF.InvalidateAHStatusCache()
+    end
     return mirrored
 end
 

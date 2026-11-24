@@ -389,13 +389,14 @@ local function EnsureDetailFrame()
     if snoozeBtn.SetText then snoozeBtn:SetText("Snooze 24h") end
     snoozeBtn:SetScript("OnClick", function()
         if not currentOpportunity then return end
+        local opp = currentOpportunity
         local isPerm = (_G.IsShiftKeyDown and _G.IsShiftKeyDown()) == true
-        if PF.SideWindow and PF.SideWindow.SnoozeOpportunity then
-            PF.SideWindow.SnoozeOpportunity(currentOpportunity, isPerm)
-        elseif PF.SnoozePlay then
-            PF.SnoozePlay(currentOpportunity, isPerm and 0 or nil, isPerm and "permanent" or "manual")
-        end
         detailFrame:Hide()
+        if PF.SideWindow and PF.SideWindow.SnoozeOpportunity then
+            PF.SideWindow.SnoozeOpportunity(opp, isPerm)
+        elseif PF.SnoozePlay then
+            PF.SnoozePlay(opp, isPerm and 0 or nil, isPerm and "permanent" or "manual")
+        end
     end)
     snoozeBtn:SetScript("OnEnter", function(self)
         if not _G.GameTooltip then return end
