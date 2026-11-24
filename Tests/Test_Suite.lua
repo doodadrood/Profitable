@@ -1797,6 +1797,37 @@ do
     _G.PCF.Tooltip.RefreshVisibleTooltip()
     Assert(showCalls24 == 0, "PCF.Tooltip.RefreshVisibleTooltip never calls GameTooltip:Show()")
 
+    -- 24B. Embedded PCF v1.0.24 Recipe Tooltip displays distinct Item Price and Recipe Price without calling Show()
+    local origCItem24 = _G.C_Item
+    _G.C_Item = {
+        GetItemInfoInstant = function(target)
+            local id = tonumber(tostring(target):match("item:(%d+)") or target)
+            if id == 13494 then
+                return 13494, "Recipe", "Alchemy", "", 0, 9, 6 -- classID 9 == Recipe
+            elseif id == 13457 then
+                return 13457, "Consumable", "Potion", "", 0, 0, 1
+            end
+            return nil
+        end,
+    }
+    _G.PCF_DB.prices[13494] = { minBuyout = 180000, minBid = 180000, count = 2, lastUpdated = math.floor(Mock.currentTime), source = "Scan" }
+    _G.PCF_DB.prices[13457] = { minBuyout = 25000,  minBid = 25000,  count = 15, lastUpdated = math.floor(Mock.currentTime), source = "Scan" }
+    tooltipHooks24["OnTooltipCleared"](strictTooltip)
+    addedLines24 = {}
+    showCalls24 = 0
+    strictTooltip.GetItem = function()
+        return "Greater Fire Protection Potion", "|cffffffff|Hitem:13457:0:0:0|h[Greater Fire Protection Potion]|h|r"
+    end
+    postCallCb(strictTooltip, { id = 13494, hyperlink = "|cff1eff00|Hitem:13494:0:0:0|h[Recipe: Greater Fire Protection Potion]|h|r" })
+    Assert(
+        #addedLines24 == 2
+            and addedLines24[1]:find("^%s*Item Price:") ~= nil
+            and addedLines24[2]:find("^Recipe Price:") ~= nil,
+        "Embedded PCF v1.0.24 renders distinct Item Price and Recipe Price lines on recipe tooltips"
+    )
+    Assert(showCalls24 == 0, "Recipe tooltip post-call NEVER calls GameTooltip:Show()")
+    _G.C_Item = origCItem24
+
     _G.InCombatLockdown = function() return true end
     local combatOpened = _G.PF.RecipeScanner.OpenRecipe({ recipeId = 15856, name = "Hot Wolf Ribs", profession = "Cooking" })
     Assert(combatOpened == false, "PF.RecipeScanner.OpenRecipe refuses to open profession window during combat lockdown")
