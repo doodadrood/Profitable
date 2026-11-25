@@ -1414,6 +1414,9 @@ end
 --   "You won an auction for Mithril Ore (x29)" -> "Mithril Ore", 29, nil
 --   "You won an auction for Guardian Gloves"   -> "Guardian Gloves", 1, nil
 function PF.AHVerifier.ParseAuctionWonMessage(msg)
+    if msg == nil or (PF.IsSecret and PF.IsSecret(msg)) then
+        return nil, nil, nil
+    end
     if type(msg) ~= "string" or msg == "" then
         return nil, nil, nil
     end
@@ -1850,6 +1853,9 @@ function PF.AHVerifier.Init()
         end
 
         if event == "CHAT_MSG_SYSTEM" then
+            if PF.IsSecret and PF.IsSecret(arg1) then
+                return
+            end
             local wonName, wonQty, linkedId = PF.AHVerifier.ParseAuctionWonMessage(arg1)
             if wonName and wonQty and wonQty > 0 then
                 local resolvedId = ResolvePurchasedItemIdByName(wonName, linkedId)

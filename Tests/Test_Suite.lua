@@ -3607,4 +3607,24 @@ do
     PF.LoadConfig(origDB33)
 end
 
+-- 34. Regression Test: Secret string values on CHAT_MSG_SYSTEM during boss fights / combat
+do
+    local origIsSecret = _G.issecretvalue
+    local secretSentinel = "You won an auction for Mithril Ore (x29)"
+    _G.issecretvalue = function(val)
+        return val == secretSentinel
+    end
+
+    local okParse, name34, qty34, id34 = pcall(PF.AHVerifier.ParseAuctionWonMessage, secretSentinel)
+    Assert(okParse == true and name34 == nil and qty34 == nil and id34 == nil,
+        "ParseAuctionWonMessage ignores secret string values without comparing or matching them")
+
+    local okEvent = pcall(function()
+        PF.AHVerifier.frame:Trigger("CHAT_MSG_SYSTEM", secretSentinel)
+    end)
+    Assert(okEvent == true, "CHAT_MSG_SYSTEM handler ignores secret string payloads during combat/boss fights")
+
+    _G.issecretvalue = origIsSecret
+end
+
 print("\nAll Profitable test assertions passed successfully!")
